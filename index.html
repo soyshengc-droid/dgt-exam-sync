@@ -251,6 +251,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
         try { localStorage.setItem('dgt_app_unlocked', '1'); } catch (e) {}
         var lock = document.getElementById('app-lock');
         if (lock) lock.style.display = 'none';
+        if (typeof window.__onUnlock === 'function') { try { window.__onUnlock(); } catch (e) {} }
       } else {
         if (err) err.textContent = '密码错误，请重试';
         if (input) { input.value = ''; input.focus(); }
@@ -1564,14 +1565,7 @@ window.exportPDF=function(){
   var OWNER = 'soyshengc-droid', REPO = 'dgt-sync-data', BRANCH = 'main', FILE = 'sync.json';
   var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE;
   var TOKEN_KEY = 'dgt_github_token';
-
-  function getToken() {
-    var t = localStorage.getItem(TOKEN_KEY);
-    if (t) return t;
-    var p = prompt('粘贴你的 GitHub token，用于把做题记录同步到云端（每台设备只需粘贴一次）。\n需要一个对私有仓库 ' + OWNER + '/' + REPO + ' 有「Contents: Read/Write」权限的 Fine-grained token。');
-    if (p && p.trim()) { t = p.trim(); localStorage.setItem(TOKEN_KEY, t); }
-    return t || null;
-  }
+  var TOKEN_HINT = '需要一个以 github_pat_ 开头的 Fine-grained token，且对私有仓库 ' + OWNER + '/' + REPO + ' 有「Contents: Read and write」权限。每台设备只需一次。';
 
   function enc(s) { return btoa(unescape(encodeURIComponent(s))); }
   function dec(s) { return decodeURIComponent(escape(atob(s.replace(/\s/g, '')))); }
@@ -1607,48 +1601,100 @@ window.exportPDF=function(){
     if (typeof updateWrongBadge === 'function') updateWrongBadge();
     if (typeof renderHome === 'function') renderHome();
   }
+  function isAuthErr(e) { return !!(e && e.message && /401|403|404/.test(e.message)); }
 
-  window.syncPull = function (cb) {
-    var token = getToken();
-    if (!token) { if (cb) cb(new Error('no token')); return; }
-    fetch(API_URL + '?t=' + Date.now(), { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' } })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function (remote) {
-        var cloud = { h: {}, w: {} };
-        try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
-        var local = readLocal();
-        writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(local.w, cloud.w || {}) });
-        refreshUI();
-        console.log('☁️ 已从云端拉取');
-        if (cb) cb(null);
-      })
-      .catch(function (e) { if (e && e.message && e.message.indexOf('401') !== -1) localStorage.removeItem(TOKEN_KEY); console.warn('拉取云端失败（可忽略）:', e); if (cb) cb(e); });
-  };
+  // ---- token 输入弹窗（不用 prompt()，iPhone Safari 也能用）----
+  var pendingTokenCb = null;
+  function ensureModal() {
+    if (document.getElementById('token-modal')) return;
+    var d = document.createElement('div');
+    d.id = 'token-modal';
+    d.style.cssText = 'position:fixed;inset:0;z-index:2147483001;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:16px';
+    d.innerHTML = '<div style="background:#fff;color:#111;border-radius:14px;padding:20px;max-width:420px;width:100%;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif">'
+      + '<h3 style="margin:0 0 8px;font-size:18px">☁️ 输入同步 Token</h3>'
+      + '<p id="token-hint" style="margin:0 0 12px;font-size:13px;color:#555;line-height:1.5"></p>'
+      + '<textarea id="token-input" rows="2" placeholder="github_pat_..." autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;padding:10px;font-size:13px;border:1px solid #ccc;border-radius:8px;resize:vertical"></textarea>'
+      + '<div style="display:flex;gap:8px;margin-top:12px">'
+      + '<button id="token-save" style="flex:1;padding:10px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-size:15px;font-weight:600">保存并同步</button>'
+      + '<button id="token-cancel" style="padding:10px 14px;border:1px solid #ccc;border-radius:8px;background:#fff;color:#333;font-size:15px">取消</button>'
+      + '</div></div>';
+    document.body.appendChild(d);
+    document.getElementById('token-save').onclick = function () {
+      var v = document.getElementById('token-input').value.trim();
+      if (!v) { return; }
+      try { localStorage.setItem(TOKEN_KEY, v); } catch (e) {}
+      hideModal();
+      var cb = pendingTokenCb; pendingTokenCb = null;
+      if (cb) cb(v);
+    };
+    document.getElementById('token-cancel').onclick = function () {
+      hideModal();
+      var cb = pendingTokenCb; pendingTokenCb = null;
+      if (cb) cb(null);
+    };
+  }
+  function showModal(hint) {
+    ensureModal();
+    document.getElementById('token-hint').textContent = hint || TOKEN_HINT;
+    document.getElementById('token-input').value = '';
+    document.getElementById('token-modal').style.display = 'flex';
+    var el = document.getElementById('token-input'); if (el) setTimeout(function () { try { el.focus(); } catch (e) {} }, 50);
+  }
+  function hideModal() { var d = document.getElementById('token-modal'); if (d) d.style.display = 'none'; }
 
-  window.syncPush = function (cb) {
-    var token = getToken();
-    if (!token) { if (cb) cb(new Error('no token')); return; }
-    var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
-    fetch(API_URL, { headers: H })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function (remote) {
-        var cloud = { h: {}, w: {} };
-        try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
-        var local = readLocal();
-        var merged = { h: mergeHist(cloud.h || {}, local.h), w: mergeWrong(cloud.w || {}, local.w) };
-        writeLocal(merged);
-        refreshUI();
-        var body = JSON.stringify({
-          message: 'sync ' + new Date().toISOString(),
-          content: enc(JSON.stringify(merged)),
-          sha: remote.sha, branch: BRANCH
+  function ensureToken(cb) {
+    var t = null;
+    try { t = localStorage.getItem(TOKEN_KEY); } catch (e) {}
+    if (t) { cb(t); return; }
+    pendingTokenCb = cb;
+    showModal();
+  }
+
+  // ---- 拉取 / 上传 ----
+  window.syncPull = function (done) {
+    ensureToken(function (token) {
+      fetch(API_URL + '?t=' + Date.now(), { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' } })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (remote) {
+          var cloud = { h: {}, w: {} };
+          try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
+          var local = readLocal();
+          writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(local.w, cloud.w || {}) });
+          refreshUI();
+          console.log('☁️ 已从云端拉取');
+          if (done) done(null);
+        })
+        .catch(function (e) {
+          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPull(done); else if (done) done(null); }; }
+          else { console.warn('拉取云端失败（可忽略）:', e); if (done) done(e); }
         });
-        return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
-      })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); console.log('☁️ 已上传到云端'); if (cb) cb(null); })
-      .catch(function (e) { if (e && e.message && e.message.indexOf('401') !== -1) localStorage.removeItem(TOKEN_KEY); console.error('上传云端失败:', e); if (cb) cb(e); });
+    });
   };
 
+  window.syncPush = function (done) {
+    ensureToken(function (token) {
+      var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
+      fetch(API_URL, { headers: H })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (remote) {
+          var cloud = { h: {}, w: {} };
+          try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
+          var local = readLocal();
+          var merged = { h: mergeHist(cloud.h || {}, local.h), w: mergeWrong(cloud.w || {}, local.w) };
+          writeLocal(merged);
+          refreshUI();
+          var body = JSON.stringify({ message: 'sync ' + new Date().toISOString(), content: enc(JSON.stringify(merged)), sha: remote.sha, branch: BRANCH });
+          return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
+        })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); console.log('☁️ 已上传到云端'); if (done) done(null); })
+        .catch(function (e) {
+          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(null); }; }
+          else { console.error('上传云端失败:', e); if (done) done(e); }
+        });
+    });
+  };
+
+  // ---- 右下角同步按钮 ----
   function addButton() {
     if (document.getElementById('btn-sync')) return;
     var b = document.createElement('button');
@@ -1657,14 +1703,24 @@ window.exportPDF=function(){
     b.onclick = function () {
       b.textContent = '⏳'; b.disabled = true;
       window.syncPush(function (err) {
-        if (err) alert(err.message && err.message.indexOf('401') !== -1 ? 'token 无效，已清除，请再点一次重新粘贴。' : '同步失败，请检查网络或 token。');
+        if (err) alert('同步失败，请检查网络或 token。');
         b.textContent = '☁️'; b.disabled = false;
       });
     };
     document.body.appendChild(b);
   }
 
-  if (localStorage.getItem(TOKEN_KEY)) window.syncPull();
+  function appUnlocked() { try { return localStorage.getItem('dgt_app_unlocked') === '1'; } catch (e) { return false; } }
+  function tryAutoSync() {
+    var has = false;
+    try { has = !!localStorage.getItem(TOKEN_KEY); } catch (e) {}
+    if (has) { window.syncPull(); }
+    else if (appUnlocked()) { ensureToken(function (t) { if (t) window.syncPull(); }); }
+  }
+
+  window.__onUnlock = function () { tryAutoSync(); };
+
+  tryAutoSync();
   addButton();
 })();
 </script>
