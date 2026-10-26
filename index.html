@@ -190,6 +190,15 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .mode-badge.review{background:#fef3c7;color:#b45309}
 .mode-badge.study{background:#e6f4ea;color:var(--success)}
 
+/* ========== PRACTICE FEEDBACK ========== */
+.option-btn.correct-opt{border-color:var(--success);background:#e6f4ea;font-weight:600}
+.option-btn.correct-opt .option-letter{background:var(--success);color:#fff}
+.option-btn.wrong-opt{border-color:var(--danger);background:#fde8e8;font-weight:600}
+.option-btn.wrong-opt .option-letter{background:var(--danger);color:#fff}
+.practice-feedback{margin-top:6px;padding:12px 14px;border-radius:var(--radius-sm);font-size:14px;font-weight:600;border:2px solid}
+.practice-feedback.correct{background:#e6f4ea;border-color:var(--success);color:#0d904f}
+.practice-feedback.wrong{background:#fde8e8;border-color:var(--danger);color:#991b1b}
+
 /* ========== TOAST ========== */
 .toast{position:fixed;bottom:24px;right:24px;background:var(--dark);color:#fff;padding:14px 24px;border-radius:var(--radius-sm);font-weight:600;z-index:300;animation:slideIn .3s ease;box-shadow:0 8px 24px rgba(0,0,0,.3)}
 @keyframes slideIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
@@ -258,6 +267,25 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     <button class="filter-btn" onclick="filterTests('done',this)">✅ Hechos</button>
     <button class="filter-btn" onclick="filterTests('pending',this)">⬜ Pendientes</button>
     <button class="filter-btn" onclick="filterTests('failed',this)">❌ Suspensos (&lt;27)</button>
+  </div>
+
+  <!-- Practice Modes -->
+  <div style="margin-bottom:14px">
+    <div style="font-weight:700;font-size:15px;color:var(--dark);margin-bottom:8px">🎯 Modos de Práctica</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px">
+      <button onclick="startRandomTimed()" style="cursor:pointer;background:#e8f0fe;color:#1a73e8;border:2px solid #1a73e8;border-radius:var(--radius);padding:12px;font-size:13px;font-weight:700;text-align:center;transition:all .2s;line-height:1.35">
+        🎲 Test Aleatorio Cronometrado<br><span style="font-weight:400;font-size:11px;opacity:.9">30 preguntas al azar del banco · 30 min</span>
+      </button>
+      <button onclick="startRandomPractice()" style="cursor:pointer;background:#e6f4ea;color:#0d904f;border:2px solid #0d904f;border-radius:var(--radius);padding:12px;font-size:13px;font-weight:700;text-align:center;transition:all .2s;line-height:1.35">
+        🧠 Práctica Aleatoria<br><span style="font-weight:400;font-size:11px;opacity:.9">Sin tiempo · te dice la respuesta en cada pregunta</span>
+      </button>
+      <button onclick="startRepasoMode()" style="cursor:pointer;background:#fef3c7;color:#92400e;border:2px solid #f59e0b;border-radius:var(--radius);padding:12px;font-size:13px;font-weight:700;text-align:center;transition:all .2s;line-height:1.35">
+        ⏱️ Fallos Cronometrado<br><span style="font-weight:400;font-size:11px;opacity:.9">30 fallos al azar · 30 min</span>
+      </button>
+      <button onclick="startWrongPractice()" style="cursor:pointer;background:#fde8e8;color:#991b1b;border:2px solid #dc2626;border-radius:var(--radius);padding:12px;font-size:13px;font-weight:700;text-align:center;transition:all .2s;line-height:1.35">
+        📝 Práctica de Fallos<br><span style="font-weight:400;font-size:11px;opacity:.9">Sin tiempo · correcto/incorrecto + respuesta</span>
+      </button>
+    </div>
   </div>
 
   <!-- Repaso Mode: prominent action card -->
@@ -402,9 +430,23 @@ let timerInterval = null;
 let timeRemaining = TIME_LIMIT;
 let testStartTime = null;
 let currentFilter = 'all';
-let isRepasoMode = false;       // Repaso mode flag
+let currentMode = 'test';        // 'test' | 'repaso' | 'random_timed' | 'random_practice' | 'wrong_practice'
+let elapsedSeconds = 0;          // counts up for untimed practice modes
 let lastAnswerTime = 0;         // Debounce timestamp
 const ANSWER_DEBOUNCE = 400;    // ms between answer clicks
+
+// Mode helpers
+function isPractice() { return currentMode === 'random_practice' || currentMode === 'wrong_practice'; }
+function isWrongPool() { return currentMode === 'repaso' || currentMode === 'wrong_practice'; }
+function modeName() {
+  switch (currentMode) {
+    case 'repaso': return 'Modo Repaso';
+    case 'random_timed': return 'Test Aleatorio';
+    case 'random_practice': return 'Práctica Aleatoria';
+    case 'wrong_practice': return 'Práctica de Fallos';
+    default: return '';
+  }
+}
 
 // ==================== PERSISTENCE ====================
 function getHistory() {
@@ -422,7 +464,7 @@ function showPage(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-' + page).classList.add('active');
   currentPage = page;
-  if (page === 'home') { stopTimer(); isRepasoMode = false; renderHome(); }
+  if (page === 'home') { stopTimer(); currentMode = 'test'; renderHome(); }
   if (page === 'stats') { stopTimer(); renderStatistics(); }
   if (page === 'wrong') renderWrongCollection();
   // Exit confirmation: warn if leaving exam page
@@ -514,7 +556,7 @@ async function startTest(testNum) {
   userAnswers = {};
   timeRemaining = TIME_LIMIT;
   testStartTime = Date.now();
-  isRepasoMode = false;
+  currentMode = 'test';
   lastAnswerTime = 0;
 
   document.getElementById('exam-num').textContent = testNum;
@@ -566,7 +608,7 @@ function startRepasoMode() {
   userAnswers = {};
   timeRemaining = TIME_LIMIT;
   testStartTime = Date.now();
-  isRepasoMode = true;
+  currentMode = 'repaso';
   lastAnswerTime = 0;
 
   document.getElementById('exam-num').textContent = 'Repaso';
@@ -601,6 +643,109 @@ function startRepasoMode() {
   });
 }
 
+// ==================== PRACTICE MODES ====================
+var _allQuestionsCache = null;
+
+function loadAllQuestions(cb) {
+  if (_allQuestionsCache) { cb(_allQuestionsCache); return; }
+  fetch('all_questions.json')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(arr => { _allQuestionsCache = arr; cb(arr); })
+    .catch(e => { showToast('⚠️ No se pudo cargar el banco de preguntas: ' + e.message); cb(null); });
+}
+
+function pickRandom(arr, n) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, Math.min(n, a.length));
+}
+
+function startRandomTimed() {
+  loadAllQuestions(arr => {
+    if (!arr || !arr.length) return;
+    beginPracticeSession(pickRandom(arr, QUESTIONS_PER_TEST), 'random_timed', 'Aleatorio', '🎲 Test Aleatorio Cronometrado');
+  });
+}
+
+function startRandomPractice() {
+  loadAllQuestions(arr => {
+    if (!arr || !arr.length) return;
+    beginPracticeSession(pickRandom(arr, QUESTIONS_PER_TEST), 'random_practice', 'Aleatorio', '🧠 Práctica Aleatoria');
+  });
+}
+
+function startWrongPractice() {
+  const entries = Object.values(getWrongCollection());
+  if (entries.length === 0) { showToast('🎉 ¡No hay preguntas falladas!'); return; }
+  const selected = pickRandom(entries, QUESTIONS_PER_TEST);
+  const qs = selected.map(wq => ({
+    pregunta_id: wq.pregunta_id,
+    pregunta: wq.pregunta,
+    opciones: wq.opciones,
+    respuesta_correcta: wq.respuesta_correcta,
+    tiene_imagen: !!wq.tiene_imagen,
+    imagen_base64: null,
+    test_num: wq.test_num,
+    tema: wq.tema,
+    referencia_libro: wq.referencia_libro,
+    referencia_libro_red: wq.referencia_libro_red,
+    explicacion: wq.explicacion || null,
+  }));
+  beginPracticeSession(qs, 'wrong_practice', 'Fallos', '📝 Práctica de Fallos');
+}
+
+function beginPracticeSession(questions, mode, shortLabel, bannerLabel) {
+  if (!questions.length) { showToast('No hay preguntas disponibles'); return; }
+  currentQuestions = questions;
+  currentTestNum = mode;
+  currentQIndex = 0;
+  userAnswers = {};
+  timeRemaining = TIME_LIMIT;
+  elapsedSeconds = 0;
+  testStartTime = Date.now();
+  currentMode = mode;
+  lastAnswerTime = 0;
+
+  document.getElementById('exam-num').textContent = shortLabel;
+  showPage('exam');
+  window.addEventListener('beforeunload', beforeUnloadHandler);
+
+  // Mode banner
+  const examTop = document.querySelector('#page-exam .exam-top');
+  let banner = document.getElementById('mode-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'mode-banner';
+    banner.className = 'repaso-banner';
+    banner.innerHTML = '<span class="repaso-banner-text"></span><span class="mode-badge study"></span>';
+    examTop.after(banner);
+  }
+  banner.querySelector('.repaso-banner-text').textContent =
+    `${bannerLabel} — ${questions.length} preguntas${isPractice() ? ' · sin tiempo' : ' · cronometrado'}`;
+  const badge = banner.querySelector('.mode-badge');
+  badge.textContent = isPractice() ? 'Estudio' : 'Práctica';
+  badge.className = 'mode-badge ' + (isPractice() ? 'study' : 'exam');
+  banner.style.display = 'flex';
+
+  renderQuestionNav();
+  renderQuestion();
+  if (isPractice()) startElapsedTimer(); else startTimer();
+
+  // Load images on demand (images are not stored in the index/localStorage)
+  questions.forEach((q, idx) => {
+    if (!q.tiene_imagen) return;
+    getWrongImageDataURI(q, src => {
+      if (src && currentQuestions[idx]) {
+        currentQuestions[idx].imagen_base64 = src.split('base64,')[1];
+        if (idx === currentQIndex) renderQuestion();
+      }
+    });
+  });
+}
+
 function renderQuestionNav() {
   const nav = document.getElementById('question-nav');
   const total = currentQuestions.length || QUESTIONS_PER_TEST;
@@ -608,7 +753,12 @@ function renderQuestionNav() {
   for (let i = 0; i < total; i++) {
     let cls = 'qnav-btn';
     if (i === currentQIndex) cls += ' current';
-    if (userAnswers[i] !== undefined) cls += ' answered';
+    if (userAnswers[i] !== undefined) {
+      cls += ' answered';
+      if (isPractice() && currentQuestions[i]) {
+        cls += userAnswers[i] === currentQuestions[i].respuesta_correcta ? ' correct' : ' wrong';
+      }
+    }
     html += `<button class="${cls}" onclick="goToQuestion(${i})">${i+1}</button>`;
   }
   nav.innerHTML = html;
@@ -624,9 +774,11 @@ function renderQuestion() {
   document.getElementById('exam-q-curr').textContent = currentQIndex + 1;
   document.getElementById('answered-count').textContent = `${Object.keys(userAnswers).length}/${totalQ} contestadas`;
 
-  // Repaso banner
+  // Mode banners
   const banner = document.getElementById('repaso-banner');
-  if (banner) banner.style.display = isRepasoMode ? 'flex' : 'none';
+  if (banner) banner.style.display = (currentMode === 'repaso') ? 'flex' : 'none';
+  const modeBanner = document.getElementById('mode-banner');
+  if (modeBanner) modeBanner.style.display = (currentMode === 'random_timed' || currentMode === 'random_practice' || currentMode === 'wrong_practice') ? 'flex' : 'none';
 
   // Image with zoom
   const imgDiv = document.getElementById('q-image');
@@ -645,14 +797,29 @@ function renderQuestion() {
   const optsDiv = document.getElementById('q-options');
   let html = '';
   const selected = userAnswers[currentQIndex];
+  const practice = isPractice();
+  const answered = practice && selected !== undefined;
   q.opciones.forEach(opt => {
-    const sel = selected === opt.letra ? ' selected' : '';
+    let cls = '';
+    if (answered) {
+      if (opt.letra === q.respuesta_correcta) cls = ' correct-opt';
+      else if (opt.letra === selected) cls = ' wrong-opt';
+    } else if (selected === opt.letra) {
+      cls = ' selected';
+    }
+    const onclick = answered ? '' : `onclick="selectAnswer('${opt.letra}')"`;
     html += `
-      <button class="option-btn${sel}" onclick="selectAnswer('${opt.letra}')">
+      <button class="option-btn${cls}" ${onclick}>
         <span class="option-letter">${opt.letra}</span>
         <span>${opt.texto}</span>
       </button>`;
   });
+  if (answered) {
+    const ok = selected === q.respuesta_correcta;
+    html += `<div class="practice-feedback ${ok ? 'correct' : 'wrong'}">${ok ? '✅ ¡Correcto!' : '❌ Incorrecto · Respuesta correcta: <strong>' + q.respuesta_correcta + '</strong>'}`;
+    if (q.explicacion) html += `<div style="margin-top:4px;font-weight:400;font-size:12px">💡 ${q.explicacion}</div>`;
+    html += `</div>`;
+  }
   optsDiv.innerHTML = html;
 
   // Book reference
@@ -767,8 +934,11 @@ function selectAnswer(letter) {
   const now = Date.now();
   if (now - lastAnswerTime < ANSWER_DEBOUNCE) return;
   lastAnswerTime = now;
+  // Practice mode: answer is locked once given (immediate feedback, no re-answer)
+  if (isPractice() && userAnswers[currentQIndex] !== undefined) return;
   userAnswers[currentQIndex] = letter;
   renderQuestion();
+  if (isPractice()) return; // no auto-advance; review feedback then tap "Siguiente"
   // Auto-advance to next question after short delay (unless it's the last question)
   const total = currentQuestions.length || QUESTIONS_PER_TEST;
   if (currentQIndex < total - 1) {
@@ -835,21 +1005,37 @@ function stopTimer() {
 }
 
 function updateTimerDisplay() {
+  const el = document.getElementById('timer');
+  el.className = 'timer';
+  if (isPractice()) {
+    const m = Math.floor(elapsedSeconds / 60);
+    const s = elapsedSeconds % 60;
+    el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    el.title = 'Sin tiempo límite';
+    return;
+  }
   const mins = Math.floor(timeRemaining / 60);
   const secs = timeRemaining % 60;
-  const display = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
-  const el = document.getElementById('timer');
-  el.textContent = display;
-  el.className = 'timer';
+  el.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
   if (timeRemaining <= 60) el.classList.add('danger');
   else if (timeRemaining <= 300) el.classList.add('warning');
+}
+
+function startElapsedTimer() {
+  stopTimer();
+  elapsedSeconds = 0;
+  updateTimerDisplay();
+  timerInterval = setInterval(() => {
+    elapsedSeconds++;
+    updateTimerDisplay();
+  }, 1000);
 }
 
 // ==================== FINISH TEST ====================
 function finishTest() {
   stopTimer();
   window.removeEventListener('beforeunload', beforeUnloadHandler);
-  const timeUsed = TIME_LIMIT - timeRemaining;
+  const timeUsed = isPractice() ? elapsedSeconds : (TIME_LIMIT - timeRemaining);
   const totalQ = currentQuestions.length;
 
   // Calculate score
@@ -874,8 +1060,8 @@ function finishTest() {
     reviewItems.push({question: q, userAnswer: userAns, isCorrect, index: i});
   });
 
-  // Save to history (only if NOT repaso mode)
-  if (!isRepasoMode) {
+  // Save to history (only for official numbered tests)
+  if (currentMode === 'test') {
     const history = getHistory();
     history[currentTestNum] = {
       score: correct,
@@ -889,8 +1075,8 @@ function finishTest() {
 
   // Update wrong collection
   const wrongColl = getWrongCollection();
-  if (isRepasoMode) {
-    // Repaso mode: remove questions answered correctly, increment wrong ones
+  if (isWrongPool()) {
+    // Wrong-pool modes (repaso / práctica de fallos): remove correct, increment wrong
     currentQuestions.forEach((q, i) => {
       const userAns = userAnswers[i];
       const key = String(q.pregunta_id);
@@ -904,7 +1090,7 @@ function finishTest() {
       }
     });
   } else {
-    // Normal mode: add wrong questions
+    // Full-pool modes (test / aleatorio): add wrong questions
     wrongQuestions.forEach(wq => {
       const key = String(wq.pregunta_id);
       if (!wrongColl[key]) {
@@ -942,9 +1128,12 @@ function renderResults(correct, timeUsed, reviewItems) {
 
   const mins = Math.floor(timeUsed / 60);
   const secs = timeUsed % 60;
-  const modeLabel = isRepasoMode ? ' [Modo Repaso]' : '';
-  document.getElementById('result-detail').textContent =
-    `Tiempo: ${mins}:${String(secs).padStart(2,'0')} · ${correct >= 27 ? '✅ APTO' : '❌ NO APTO'} · Se necesitan 27 aciertos para aprobar${modeLabel}`;
+  const mName = modeName();
+  const modeLabel = mName ? ' [' + mName + ']' : '';
+  const timeStr = `Tiempo: ${mins}:${String(secs).padStart(2,'0')}`;
+  document.getElementById('result-detail').textContent = isPractice()
+    ? `${timeStr} · ${correct} correctas${modeLabel}`
+    : `${timeStr} · ${correct >= 27 ? '✅ APTO' : '❌ NO APTO'} · Se necesitan 27 aciertos para aprobar${modeLabel}`;
 
   const bar = document.getElementById('result-bar-fill');
   bar.style.width = (correct / total * 100) + '%';
@@ -984,10 +1173,12 @@ function renderResults(correct, timeUsed, reviewItems) {
 }
 
 function retryTest() {
-  if (isRepasoMode) {
-    startRepasoMode();
-  } else if (currentTestNum) {
-    startTest(currentTestNum);
+  switch (currentMode) {
+    case 'repaso': startRepasoMode(); break;
+    case 'random_timed': startRandomTimed(); break;
+    case 'random_practice': startRandomPractice(); break;
+    case 'wrong_practice': startWrongPractice(); break;
+    default: if (currentTestNum) startTest(currentTestNum);
   }
 }
 
