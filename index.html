@@ -1333,7 +1333,7 @@ window.exportPDF=function(){
   function getToken() {
     var t = localStorage.getItem(TOKEN_KEY);
     if (t) return t;
-    var p = prompt('Pega tu token de GitHub para guardar en la nube (solo una vez en este dispositivo). Debe tener acceso de escritura (Contents: Read/Write) al repo "' + OWNER + '/' + REPO + '".');
+    var p = prompt('粘贴你的 GitHub token，用于把做题记录同步到云端（每台设备只需粘贴一次）。\n需要一个对私有仓库 ' + OWNER + '/' + REPO + ' 有「Contents: Read/Write」权限的 Fine-grained token。');
     if (p && p.trim()) { t = p.trim(); localStorage.setItem(TOKEN_KEY, t); }
     return t || null;
   }
@@ -1387,7 +1387,7 @@ window.exportPDF=function(){
         console.log('☁️ 已从云端拉取');
         if (cb) cb(null);
       })
-      .catch(function (e) { console.warn('拉取云端失败（可忽略）:', e); if (cb) cb(e); });
+      .catch(function (e) { if (e && e.message && e.message.indexOf('401') !== -1) localStorage.removeItem(TOKEN_KEY); console.warn('拉取云端失败（可忽略）:', e); if (cb) cb(e); });
   };
 
   window.syncPush = function (cb) {
@@ -1411,18 +1411,18 @@ window.exportPDF=function(){
         return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
       })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); console.log('☁️ 已上传到云端'); if (cb) cb(null); })
-      .catch(function (e) { console.error('上传云端失败:', e); if (cb) cb(e); });
+      .catch(function (e) { if (e && e.message && e.message.indexOf('401') !== -1) localStorage.removeItem(TOKEN_KEY); console.error('上传云端失败:', e); if (cb) cb(e); });
   };
 
   function addButton() {
     if (document.getElementById('btn-sync')) return;
     var b = document.createElement('button');
-    b.id = 'btn-sync'; b.textContent = '☁️'; b.title = 'Sincronizar con la nube';
+    b.id = 'btn-sync'; b.textContent = '☁️'; b.title = '同步到云端';
     b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;width:52px;height:52px;border-radius:50%;border:none;background:var(--primary,#2b6cb0);color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3)';
     b.onclick = function () {
       b.textContent = '⏳'; b.disabled = true;
       window.syncPush(function (err) {
-        if (err) alert('No se pudo sincronizar. Comprueba tu token de GitHub.');
+        if (err) alert(err.message && err.message.indexOf('401') !== -1 ? 'token 无效，已清除，请再点一次重新粘贴。' : '同步失败，请检查网络或 token。');
         b.textContent = '☁️'; b.disabled = false;
       });
     };
