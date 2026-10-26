@@ -224,6 +224,50 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 </head>
 <body>
 
+<!-- PASSWORD GATE -->
+<div id="app-lock" style="position:fixed;inset:0;z-index:2147483000;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
+  <div style="font-size:44px">🔒</div>
+  <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700">请输入密码进入</h1>
+  <p style="margin:0;color:#94a3b8;font-size:14px">此题库为私人使用，输入密码后才能刷题</p>
+  <input id="app-pass-input" type="password" autocomplete="off" placeholder="密码" style="width:min(320px,82vw);padding:12px 16px;font-size:16px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#fff;text-align:center;outline:none">
+  <button id="app-pass-btn" onclick="window.__tryUnlock()" style="width:min(320px,82vw);padding:12px 16px;font-size:16px;font-weight:600;border-radius:10px;border:none;background:#2563eb;color:#fff;cursor:pointer">进入</button>
+  <p id="app-pass-err" style="margin:0;color:#f87171;font-size:14px;min-height:18px"></p>
+</div>
+
+<script>
+(function () {
+  var HASH = '0d68eb17363a3a3ec8915c062c2150a3296151fec3ac6e96ac798ca8e3663605';
+  function unlocked() { try { return localStorage.getItem('dgt_app_unlocked') === '1'; } catch (e) { return false; } }
+  async function sha256Hex(s) {
+    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+  window.__tryUnlock = async function () {
+    var input = document.getElementById('app-pass-input');
+    var err = document.getElementById('app-pass-err');
+    var v = input ? input.value : '';
+    try {
+      if ((await sha256Hex(v)) === HASH) {
+        try { localStorage.setItem('dgt_app_unlocked', '1'); } catch (e) {}
+        var lock = document.getElementById('app-lock');
+        if (lock) lock.style.display = 'none';
+      } else {
+        if (err) err.textContent = '密码错误，请重试';
+        if (input) { input.value = ''; input.focus(); }
+      }
+    } catch (e) {
+      if (err) err.textContent = '此设备不支持安全加密，请换用最新版浏览器';
+    }
+  };
+  function init() {
+    if (unlocked()) { var lock = document.getElementById('app-lock'); if (lock) lock.style.display = 'none'; return; }
+    var input = document.getElementById('app-pass-input');
+    if (input) { input.addEventListener('keydown', function (e) { if (e.key === 'Enter') window.__tryUnlock(); }); input.focus(); }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
+</script>
+
 <!-- HEADER -->
 <header class="header">
   <div class="header-left">
