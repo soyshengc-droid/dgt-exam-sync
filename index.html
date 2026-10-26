@@ -479,6 +479,9 @@ let currentMode = 'test';        // 'test' | 'repaso' | 'random_timed' | 'random
 let elapsedSeconds = 0;          // counts up for untimed practice modes
 let lastAnswerTime = 0;         // Debounce timestamp
 const ANSWER_DEBOUNCE = 400;    // ms between answer clicks
+let sessionWrongBaseline = null; // 错题本在本次作答开始前的快照
+let answerTimes = {};            // 题号 -> 作答时间（ISO）
+let _syncWrongTimer = null;      // 错题云同步防抖定时器
 
 // Mode helpers
 function isPractice() { return currentMode === 'random_practice' || currentMode === 'wrong_practice'; }
@@ -503,6 +506,70 @@ function getWrongCollection() {
   try { return JSON.parse(localStorage.getItem('dgt_wrong_collection') || '{}'); } catch(e) { return {}; }
 }
 function saveWrongCollection(w) { localStorage.setItem('dgt_wrong_collection', JSON.stringify(w)); }
+
+function makeWrongEntry(q) {
+  return {
+    pregunta_id: q.pregunta_id,
+    pregunta: q.pregunta,
+    opciones: q.opciones,
+    respuesta_correcta: q.respuesta_correcta,
+    tema: q.tema,
+    referencia_libro: q.referencia_libro,
+    tiene_imagen: !!q.tiene_imagen,
+    imagen_base64: null,
+    test_num: q.test_num,
+    times_wrong: 0,
+    last_wrong: null,
+  };
+}
+
+// 根据当前作答实时重算错题本（幂等，可重复调用，不会重复计数）。
+// includeUnanswered=true 时，未作答的题按"答错"处理（只在交卷时使用）。
+function recomputeWrongCollection(includeUnanswered) {
+  if (sessionWrongBaseline === null) {
+    try { sessionWrongBaseline = JSON.parse(JSON.stringify(getWrongCollection())); }
+    catch (e) { sessionWrongBaseline = {}; }
+  }
+  const wrongColl = JSON.parse(JSON.stringify(sessionWrongBaseline));
+  const wrongPool = isWrongPool();
+  const now = new Date().toISOString();
+  currentQuestions.forEach((q, i) => {
+    const ans = userAnswers[i];
+    if (ans === undefined && !includeUnanswered) return;
+    const key = String(q.pregunta_id);
+    const isCorrect = ans === q.respuesta_correcta;
+    const baseTimes = (sessionWrongBaseline[key] && sessionWrongBaseline[key].times_wrong) || 0;
+    if (wrongPool) {
+      if (isCorrect) { delete wrongColl[key]; }
+      else {
+        if (!wrongColl[key]) wrongColl[key] = makeWrongEntry(q);
+        wrongColl[key].times_wrong = baseTimes + 1;
+        wrongColl[key].last_wrong = answerTimes[i] || now;
+      }
+    } else {
+      if (!isCorrect) {
+        if (!wrongColl[key]) wrongColl[key] = makeWrongEntry(q);
+        wrongColl[key].times_wrong = baseTimes + 1;
+        wrongColl[key].last_wrong = answerTimes[i] || now;
+      }
+    }
+  });
+  return wrongColl;
+}
+
+function commitWrongCollection(includeUnanswered) {
+  saveWrongCollection(recomputeWrongCollection(includeUnanswered));
+  updateWrongBadge();
+}
+
+// 有 token 时才做防抖云同步，避免每答一题就 PUT 一次
+function debouncedSyncWrong() {
+  var hasToken = false;
+  try { hasToken = !!localStorage.getItem('dgt_github_token'); } catch (e) {}
+  if (!hasToken || typeof syncPush !== 'function') return;
+  clearTimeout(_syncWrongTimer);
+  _syncWrongTimer = setTimeout(function () { try { syncPush(); } catch (e) {} }, 2000);
+}
 
 // ==================== NAVIGATION ====================
 function showPage(page) {
@@ -599,6 +666,8 @@ async function startTest(testNum) {
   currentTestNum = testNum;
   currentQIndex = 0;
   userAnswers = {};
+  sessionWrongBaseline = null;
+  answerTimes = {};
   timeRemaining = TIME_LIMIT;
   testStartTime = Date.now();
   currentMode = 'test';
@@ -651,6 +720,8 @@ function startRepasoMode() {
   currentTestNum = 'Repaso';
   currentQIndex = 0;
   userAnswers = {};
+  sessionWrongBaseline = null;
+  answerTimes = {};
   timeRemaining = TIME_LIMIT;
   testStartTime = Date.now();
   currentMode = 'repaso';
@@ -748,6 +819,8 @@ function beginPracticeSession(questions, mode, shortLabel, bannerLabel) {
   currentTestNum = mode;
   currentQIndex = 0;
   userAnswers = {};
+  sessionWrongBaseline = null;
+  answerTimes = {};
   timeRemaining = TIME_LIMIT;
   elapsedSeconds = 0;
   testStartTime = Date.now();
@@ -982,6 +1055,9 @@ function selectAnswer(letter) {
   // Practice mode: answer is locked once given (immediate feedback, no re-answer)
   if (isPractice() && userAnswers[currentQIndex] !== undefined) return;
   userAnswers[currentQIndex] = letter;
+  answerTimes[currentQIndex] = new Date().toISOString();
+  commitWrongCollection(false);   // 立即记入错题本（幂等，重答不重复计数）
+  debouncedSyncWrong();           // 有 token 时防抖同步云端
   renderQuestion();
   if (isPractice()) return; // no auto-advance; review feedback then tap "Siguiente"
   // Auto-advance to next question after short delay (unless it's the last question)
@@ -1118,47 +1194,9 @@ function finishTest() {
     saveHistory(history);
   }
 
-  // Update wrong collection
-  const wrongColl = getWrongCollection();
-  if (isWrongPool()) {
-    // Wrong-pool modes (repaso / práctica de fallos): remove correct, increment wrong
-    currentQuestions.forEach((q, i) => {
-      const userAns = userAnswers[i];
-      const key = String(q.pregunta_id);
-      if (userAns === q.respuesta_correcta && wrongColl[key]) {
-        // Correct in repaso → remove from collection
-        delete wrongColl[key];
-      } else if (userAns !== q.respuesta_correcta && wrongColl[key]) {
-        // Still wrong → increment counter
-        wrongColl[key].times_wrong++;
-        wrongColl[key].last_wrong = new Date().toISOString();
-      }
-    });
-  } else {
-    // Full-pool modes (test / aleatorio): add wrong questions
-    wrongQuestions.forEach(wq => {
-      const key = String(wq.pregunta_id);
-      if (!wrongColl[key]) {
-        wrongColl[key] = {
-          pregunta_id: wq.pregunta_id,
-          pregunta: wq.pregunta,
-          opciones: wq.opciones,
-          respuesta_correcta: wq.respuesta_correcta,
-          tema: wq.tema,
-          referencia_libro: wq.referencia_libro,
-          tiene_imagen: !!wq.tiene_imagen,
-          imagen_base64: null,
-          test_num: wq.test_num,
-          times_wrong: 0,
-          last_wrong: null,
-        };
-      }
-      wrongColl[key].times_wrong++;
-      wrongColl[key].last_wrong = new Date().toISOString();
-    });
-  }
-  saveWrongCollection(wrongColl);
-  updateWrongBadge();
+  // Update wrong collection (idempotent; already applied live on each answer).
+  // Unanswered questions count as wrong here, matching exam semantics.
+  commitWrongCollection(true);
   renderResults(correct, timeUsed, reviewItems);
   // --- sync to GitHub cloud ---
   if (typeof syncPush === 'function') syncPush();
