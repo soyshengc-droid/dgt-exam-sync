@@ -125,6 +125,10 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .wrong-q-meta{font-size:12px;color:var(--text2);white-space:nowrap}
 .wrong-times{background:var(--danger);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
 .wrong-correct{background:var(--success);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;margin-left:4px}
+.wrong-sort{display:flex;gap:8px;margin:4px 0 16px}
+.wrong-sort-btn{padding:6px 14px;border-radius:var(--radius-sm);border:2px solid #e0e0e0;background:var(--card);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);transition:all .2s}
+.wrong-sort-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.wrong-tema{color:var(--text2);font-weight:600;margin-left:6px}
 
 /* ========== REVIEW MODAL ========== */
 .modal-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.6);z-index:200;justify-content:center;align-items:center;padding:20px}
@@ -394,9 +398,13 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 <!-- ==================== WRONG COLLECTION PAGE ==================== -->
 <div id="page-wrong" class="page">
   <div class="page-title">📝 Colección de Fallos</div>
-  <div class="page-subtitle">Todas las preguntas falladas, organizadas por tema.</div>
+  <div class="page-subtitle">Todas las preguntas falladas.</div>
 
   <div class="wrong-stats" id="wrong-stats"></div>
+  <div class="wrong-sort" id="wrong-sort">
+    <button class="wrong-sort-btn active" id="sort-times" onclick="setWrongSort('times')">🔢 Por fallos</button>
+    <button class="wrong-sort-btn" id="sort-tema" onclick="setWrongSort('tema')">📚 Por tema</button>
+  </div>
   <div id="wrong-content"></div>
   <div style="margin-top:20px">
     <button class="btn btn-danger btn-sm" onclick="clearWrongCollection()" id="btn-clear-wrong" style="display:none">🗑️ Borrar Colección</button>
@@ -1292,13 +1300,20 @@ function showWrongCollection() {
   showPage('wrong');
 }
 
+let wrongSort = 'times'; // 'times' = 按错题次数从高到低，'tema' = 按主题分组
+
+function setWrongSort(mode) {
+  wrongSort = mode;
+  renderWrongCollection();
+}
+
 function renderWrongCollection() {
   const wrongColl = getWrongCollection();
   const entries = Object.values(wrongColl);
   document.getElementById('wrong-count-h').textContent = entries.length;
   document.getElementById('btn-clear-wrong').style.display = entries.length > 0 ? 'inline-flex' : 'none';
 
-  // Group by tema
+  // Group by tema (for stats + tema view)
   const byTema = {};
   entries.forEach(wq => {
     const t = wq.tema || '?';
@@ -1313,22 +1328,51 @@ function renderWrongCollection() {
     <div class="stat-card"><div class="stat-value">${entries.reduce((s,w) => s + w.times_wrong, 0)}</div><div class="stat-label">Fallos Totales</div></div>
   `;
 
-  // Render by topic
-  const sortedTemas = Object.keys(byTema).sort((a,b) => Number(a) - Number(b));
+  // Toggle active states
+  const st = document.getElementById('sort-times'), sm = document.getElementById('sort-tema');
+  if (st && sm) {
+    st.classList.toggle('active', wrongSort === 'times');
+    sm.classList.toggle('active', wrongSort === 'tema');
+  }
+
   let html = '';
-  if (sortedTemas.length === 0) {
+  if (entries.length === 0) {
     html = `<div class="empty-state">
       <div class="empty-icon">🎉</div>
       <div class="empty-title">¡No hay fallos!</div>
       <div class="empty-text">No has fallado ninguna pregunta todavía. ¡Sigue practicando!</div>
     </div>`;
+  } else if (wrongSort === 'times') {
+    // 按错题次数从高到低；并列时对得少的排前面，再按 id 稳定排序
+    const sorted = entries.slice().sort((a, b) => {
+      const wa = a.times_wrong || 0, wb = b.times_wrong || 0;
+      if (wb !== wa) return wb - wa;
+      const ca = a.times_correct || 0, cb = b.times_correct || 0;
+      if (ca !== cb) return ca - cb;
+      return String(a.pregunta_id).localeCompare(String(b.pregunta_id), undefined, {numeric:true});
+    });
+    html += `<div class="wrong-list">`;
+    sorted.forEach(wq => {
+      html += `<div class="wrong-item" onclick="reviewWrongQuestion('${wq.pregunta_id}')">
+        <div class="wrong-q-text">${wq.pregunta}</div>
+        <div class="wrong-q-meta">
+          <span class="wrong-times">✗${wq.times_wrong}</span>
+          <span class="wrong-correct">✓${wq.times_correct || 0}</span>
+          <span class="wrong-tema">Tema ${wq.tema || '?'}</span>
+          ${wq.referencia_libro ? ' · ' + wq.referencia_libro : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
   } else {
+    // 按主题分组（组内也按错题次数降序）
+    const sortedTemas = Object.keys(byTema).sort((a,b) => Number(a) - Number(b));
     sortedTemas.forEach(tema => {
-      const items = byTema[tema];
+      const items = byTema[tema].slice().sort((a,b) => ((b.times_wrong||0)-(a.times_wrong||0)));
       html += `<div class="topic-group">
         <div class="topic-title">📚 Tema ${tema} <span class="topic-count">${items.length} preguntas</span></div>
         <div class="wrong-list">`;
-      items.forEach((wq, i) => {
+      items.forEach(wq => {
         html += `<div class="wrong-item" onclick="reviewWrongQuestion('${wq.pregunta_id}')">
           <div class="wrong-q-text">${wq.pregunta}</div>
           <div class="wrong-q-meta">
