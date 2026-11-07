@@ -534,8 +534,8 @@ function makeWrongEntry(q) {
 }
 
 // 根据当前作答实时重算错题本（幂等，可重复调用，不会重复计数）。
-// includeUnanswered=true 时，未作答的题按"答错"处理（只在交卷时使用）。
-function recomputeWrongCollection(includeUnanswered) {
+// 未作答的题不计入错题本（既不 +✗ 也不 +✓）。
+function recomputeWrongCollection() {
   if (sessionWrongBaseline === null) {
     try { sessionWrongBaseline = JSON.parse(JSON.stringify(getWrongCollection())); }
     catch (e) { sessionWrongBaseline = {}; }
@@ -544,7 +544,7 @@ function recomputeWrongCollection(includeUnanswered) {
   const now = new Date().toISOString();
   currentQuestions.forEach((q, i) => {
     const ans = userAnswers[i];
-    if (ans === undefined && !includeUnanswered) return;
+    if (ans === undefined) return; // 未作答：跳过，不计入
     const key = String(q.pregunta_id);
     const isCorrect = ans === q.respuesta_correcta;
     const inBook = !!sessionWrongBaseline[key];
@@ -567,8 +567,8 @@ function recomputeWrongCollection(includeUnanswered) {
   return wrongColl;
 }
 
-function commitWrongCollection(includeUnanswered) {
-  saveWrongCollection(recomputeWrongCollection(includeUnanswered));
+function commitWrongCollection() {
+  saveWrongCollection(recomputeWrongCollection());
   updateWrongBadge();
 }
 
@@ -1066,7 +1066,7 @@ function selectAnswer(letter) {
   if (isPractice() && userAnswers[currentQIndex] !== undefined) return;
   userAnswers[currentQIndex] = letter;
   answerTimes[currentQIndex] = new Date().toISOString();
-  commitWrongCollection(false);   // 立即记入错题本（幂等，重答不重复计数）
+  commitWrongCollection();        // 立即记入错题本（幂等，重答不重复计数）
   debouncedSyncWrong();           // 有 token 时防抖同步云端
   renderQuestion();
   if (isPractice()) return; // no auto-advance; review feedback then tap "Siguiente"
@@ -1205,8 +1205,8 @@ function finishTest() {
   }
 
   // Update wrong collection (idempotent; already applied live on each answer).
-  // Unanswered questions count as wrong here, matching exam semantics.
-  commitWrongCollection(true);
+  // Unanswered questions are skipped (not counted as wrong).
+  commitWrongCollection();
   renderResults(correct, timeUsed, reviewItems);
   // --- sync to GitHub cloud ---
   if (typeof syncPush === 'function') syncPush();
