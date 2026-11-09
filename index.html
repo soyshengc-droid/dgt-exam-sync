@@ -99,6 +99,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .result-score{font-size:64px;font-weight:800;line-height:1}
 .result-score.pass{color:var(--success)}
 .result-score.fail{color:var(--danger)}
+.result-score.practice{color:var(--primary)}
 .result-detail{font-size:14px;color:var(--text2);margin-top:8px}
 .result-bar{width:200px;height:8px;background:var(--border);border-radius:4px;margin:16px auto;overflow:hidden}
 .result-bar-fill{height:100%;border-radius:4px;transition:width .5s}
@@ -107,6 +108,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .review-item{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);border-left:4px solid var(--border)}
 .review-item.correct{border-left-color:var(--success)}
 .review-item.wrong{border-left-color:var(--danger)}
+.review-item.skipped{border-left-color:#cbd5e1}
+.review-skip{font-size:12px;font-weight:600;color:var(--text2);background:#f1f5f9;padding:2px 8px;border-radius:10px;margin-left:6px}
 .review-q{font-weight:600;margin-bottom:12px}
 .review-options{display:flex;flex-direction:column;gap:6px;font-size:14px}
 .review-opt{padding:8px 12px;border-radius:6px;background:var(--bg)}
@@ -711,9 +714,9 @@ function startRepasoMode() {
     showToast('🎉 ¡No hay preguntas falladas para repasar!');
     return;
   }
-  // Take up to 30 random wrong questions
-  const shuffled = entries.sort(() => Math.random() - 0.5);
-  const selected = shuffled.slice(0, Math.min(30, shuffled.length));
+  // 优先抽取"从未做对过"的题，最多 30 道
+  const repasoPick = pickWrongPriority(entries, 30);
+  const selected = repasoPick.selected;
   currentQuestions = selected.map(wq => ({
     pregunta_num: 0,
     pregunta_id: wq.pregunta_id,
@@ -748,9 +751,13 @@ function startRepasoMode() {
     banner = document.createElement('div');
     banner.id = 'repaso-banner';
     banner.className = 'repaso-banner';
-    banner.innerHTML = `<span class="repaso-banner-text">🔄 Modo Repaso — ${currentQuestions.length} preguntas falladas</span><span class="mode-badge review">Repaso</span>`;
+    banner.innerHTML = `<span class="repaso-banner-text"></span><span class="mode-badge review">Repaso</span>`;
     examTop.after(banner);
   }
+  const prioRepaso = Math.min(repasoPick.neverCorrectCount, currentQuestions.length);
+  banner.querySelector('.repaso-banner-text').textContent =
+    `🔄 Modo Repaso — ${currentQuestions.length} preguntas falladas` +
+    (prioRepaso > 0 ? ` · ${prioRepaso} sin acertar` : '');
   banner.style.display = 'flex';
 
   renderQuestionNav();
@@ -789,6 +796,16 @@ function pickRandom(arr, n) {
   return a.slice(0, Math.min(n, a.length));
 }
 
+// 错题池抽题优先级：从未做对过（times_correct === 0）的题优先，
+// 不够 limit 时才从"已经做对过"的题里补。两个错题模式共用。
+function pickWrongPriority(entries, limit) {
+  const neverCorrect = entries.filter(wq => (wq.times_correct || 0) === 0);
+  const alreadyCorrect = entries.filter(wq => (wq.times_correct || 0) > 0);
+  const ordered = pickRandom(neverCorrect, neverCorrect.length)
+    .concat(pickRandom(alreadyCorrect, alreadyCorrect.length));
+  return { selected: ordered.slice(0, limit), neverCorrectCount: neverCorrect.length };
+}
+
 function startRandomTimed() {
   loadAllQuestions(arr => {
     if (!arr || !arr.length) return;
@@ -806,7 +823,9 @@ function startRandomPractice() {
 function startWrongPractice() {
   const entries = Object.values(getWrongCollection());
   if (entries.length === 0) { showToast('🎉 ¡No hay preguntas falladas!'); return; }
-  const selected = pickRandom(entries, QUESTIONS_PER_TEST);
+  // 优先推送"从未做对过"的题（times_correct === 0）；够数就不再混入已做对过的题
+  const wrongPick = pickWrongPriority(entries, QUESTIONS_PER_TEST);
+  const selected = wrongPick.selected;
   const qs = selected.map(wq => ({
     pregunta_id: wq.pregunta_id,
     pregunta: wq.pregunta,
@@ -820,7 +839,9 @@ function startWrongPractice() {
     referencia_libro_red: wq.referencia_libro_red,
     explicacion: wq.explicacion || null,
   }));
-  beginPracticeSession(qs, 'wrong_practice', 'Fallos', '📝 Práctica de Fallos');
+  const prio = Math.min(wrongPick.neverCorrectCount, QUESTIONS_PER_TEST);
+  beginPracticeSession(qs, 'wrong_practice', 'Fallos',
+    prio > 0 ? `📝 Práctica de Fallos · ${prio} sin acertar` : '📝 Práctica de Fallos');
 }
 
 function beginPracticeSession(questions, mode, shortLabel, bannerLabel) {
@@ -1167,27 +1188,15 @@ function finishTest() {
   stopTimer();
   window.removeEventListener('beforeunload', beforeUnloadHandler);
   const timeUsed = isPractice() ? elapsedSeconds : (TIME_LIMIT - timeRemaining);
-  const totalQ = currentQuestions.length;
 
-  // Calculate score
+  // Calculate score（未作答不计入错题本，但仍是"未答对"）
   let correct = 0;
   const reviewItems = [];
-  const wrongQuestions = [];
 
   currentQuestions.forEach((q, i) => {
     const userAns = userAnswers[i];
-    const correctAns = q.respuesta_correcta;
-    const isCorrect = userAns === correctAns;
-
+    const isCorrect = userAns === q.respuesta_correcta;
     if (isCorrect) correct++;
-    else if (userAns !== undefined) {
-      // Wrong answer (not unanswered)
-      wrongQuestions.push({...q, userAnswer: userAns, qIndex: i});
-    } else {
-      // Unanswered = wrong
-      wrongQuestions.push({...q, userAnswer: null, qIndex: i});
-    }
-
     reviewItems.push({question: q, userAnswer: userAns, isCorrect, index: i});
   });
 
@@ -1215,32 +1224,38 @@ function finishTest() {
 
 function renderResults(correct, timeUsed, reviewItems) {
   const total = currentQuestions.length;
+  const practice = isPractice();
+  // 练习模式：未作答的题不计入分母
+  const answeredCount = reviewItems.filter(it => it.userAnswer !== undefined).length;
+  const base = practice ? answeredCount : total;
   const scoreEl = document.getElementById('result-score');
-  scoreEl.textContent = `${correct}/${total}`;
-  scoreEl.className = 'result-score ' + (correct >= 27 ? 'pass' : 'fail');
+  scoreEl.textContent = `${correct}/${base}`;
+  scoreEl.className = 'result-score ' + (practice ? 'practice' : (correct >= 27 ? 'pass' : 'fail'));
 
   const mins = Math.floor(timeUsed / 60);
   const secs = timeUsed % 60;
   const mName = modeName();
   const modeLabel = mName ? ' [' + mName + ']' : '';
   const timeStr = `Tiempo: ${mins}:${String(secs).padStart(2,'0')}`;
-  document.getElementById('result-detail').textContent = isPractice()
-    ? `${timeStr} · ${correct} correctas${modeLabel}`
+  document.getElementById('result-detail').textContent = practice
+    ? `${timeStr} · ${correct} correctas · ${total - answeredCount} sin contestar${modeLabel}`
     : `${timeStr} · ${correct >= 27 ? '✅ APTO' : '❌ NO APTO'} · Se necesitan 27 aciertos para aprobar${modeLabel}`;
 
   const bar = document.getElementById('result-bar-fill');
-  bar.style.width = (correct / total * 100) + '%';
-  bar.style.background = correct >= 27 ? 'var(--success)' : 'var(--danger)';
+  bar.style.width = (base > 0 ? correct / base * 100 : 0) + '%';
+  bar.style.background = practice ? 'var(--primary)' : (correct >= 27 ? 'var(--success)' : 'var(--danger)');
 
   // Review list
   const list = document.getElementById('review-list');
   let html = '';
   reviewItems.forEach((item, i) => {
     const q = item.question;
-    const cls = item.isCorrect ? 'correct' : 'wrong';
-    const icon = item.isCorrect ? '✅' : (item.userAnswer ? '❌' : '⬜');
+    const unanswered = item.userAnswer === undefined;
+    const cls = item.isCorrect ? 'correct' : (unanswered ? 'skipped' : 'wrong');
+    const icon = item.isCorrect ? '✅' : (unanswered ? '⬜' : '❌');
+    const tag = unanswered ? ' <span class="review-skip">No contestada</span>' : '';
     html += `<div class="review-item ${cls}">
-      <div class="review-q">${icon} <strong>P${i+1}:</strong> ${q.pregunta}</div>`;
+      <div class="review-q">${icon} <strong>P${i+1}:</strong> ${q.pregunta}${tag}</div>`;
     const riSrc = getImageSrc(q);
     if (riSrc) {
       html += `<div style="margin:10px 0;text-align:center"><img src="${riSrc}" style="max-width:100%;max-height:200px;border-radius:8px" onerror="this.style.display='none'"></div>`;
