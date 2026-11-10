@@ -1336,9 +1336,13 @@ function renderWrongCollection() {
     byTema[t].push(wq);
   });
 
+  // 错过至少一次、但至今一次都没做对过的题
+  const neverCorrect = entries.filter(w => (w.times_correct || 0) === 0).length;
+
   // Stats
   document.getElementById('wrong-stats').innerHTML = `
     <div class="stat-card"><div class="stat-value">${entries.length}</div><div class="stat-label">Preguntas Falladas</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--danger)">${neverCorrect}</div><div class="stat-label">Sin Acertar (nunca)</div></div>
     <div class="stat-card"><div class="stat-value">${Object.keys(byTema).length}</div><div class="stat-label">Temas</div></div>
     <div class="stat-card"><div class="stat-value">${entries.reduce((s,w) => s + w.times_wrong, 0)}</div><div class="stat-label">Fallos Totales</div></div>
   `;
