@@ -512,12 +512,16 @@ function modeName() {
 function getHistory() {
   try { return JSON.parse(localStorage.getItem('dgt_test_history') || '{}'); } catch(e) { return {}; }
 }
-function saveHistory(h) { localStorage.setItem('dgt_test_history', JSON.stringify(h)); }
+function markDirty() {
+  try { localStorage.setItem('dgt_dirty', '1'); } catch (e) {}
+  window.__localWriteSeq = (window.__localWriteSeq || 0) + 1;
+}
+function saveHistory(h) { localStorage.setItem('dgt_test_history', JSON.stringify(h)); markDirty(); }
 
 function getWrongCollection() {
   try { return JSON.parse(localStorage.getItem('dgt_wrong_collection') || '{}'); } catch(e) { return {}; }
 }
-function saveWrongCollection(w) { localStorage.setItem('dgt_wrong_collection', JSON.stringify(w)); }
+function saveWrongCollection(w) { localStorage.setItem('dgt_wrong_collection', JSON.stringify(w)); markDirty(); }
 
 function makeWrongEntry(q) {
   return {
@@ -1714,6 +1718,10 @@ window.exportPDF=function(){
     if (typeof renderHome === 'function') renderHome();
   }
   function isAuthErr(e) { return !!(e && e.message && /401|403|404/.test(e.message)); }
+  // ---- 离线标记：本地有未上传的改动 ----
+  function isDirty() { try { return localStorage.getItem('dgt_dirty') === '1'; } catch (e) { return false; } }
+  function clearDirty() { try { localStorage.removeItem('dgt_dirty'); } catch (e) {} }
+  function hasToken() { try { return !!localStorage.getItem(TOKEN_KEY); } catch (e) { return false; } }
 
   // ---- token 输入弹窗（不用 prompt()，iPhone Safari 也能用）----
   var pendingTokenCb = null;
@@ -1785,6 +1793,7 @@ window.exportPDF=function(){
 
   window.syncPush = function (done) {
     ensureToken(function (token) {
+      var seq0 = window.__localWriteSeq || 0;
       var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
       fetch(API_URL, { headers: H })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -1798,7 +1807,7 @@ window.exportPDF=function(){
           var body = JSON.stringify({ message: 'sync ' + new Date().toISOString(), content: enc(JSON.stringify(merged)), sha: remote.sha, branch: BRANCH });
           return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
         })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); console.log('☁️ 已上传到云端'); if (done) done(null); })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if ((window.__localWriteSeq || 0) === seq0) clearDirty(); console.log('☁️ 已上传到云端'); if (done) done(null); })
         .catch(function (e) {
           if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(null); }; }
           else { console.error('上传云端失败:', e); if (done) done(e); }
@@ -1823,12 +1832,22 @@ window.exportPDF=function(){
   }
 
   function appUnlocked() { try { return localStorage.getItem('dgt_app_unlocked') === '1'; } catch (e) { return false; } }
-  function tryAutoSync() {
-    var has = false;
-    try { has = !!localStorage.getItem(TOKEN_KEY); } catch (e) {}
-    if (has) { window.syncPull(); }
-    else if (appUnlocked()) { ensureToken(function (t) { if (t) window.syncPull(); }); }
+  function doSync() {
+    if (isDirty()) { window.syncPush(); } else { window.syncPull(); }
   }
+  function tryAutoSync() {
+    if (hasToken()) { doSync(); }
+    else if (appUnlocked()) { ensureToken(function (t) { if (t) doSync(); }); }
+  }
+
+  // 网络恢复时自动把离线做的题推上去
+  window.addEventListener('online', function () {
+    if (isDirty() && hasToken()) { window.syncPush(); }
+  });
+  // 回到前台（切回 App / 解锁手机）时也补一次
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && isDirty() && hasToken()) { window.syncPush(); }
+  });
 
   window.__onUnlock = function () { tryAutoSync(); };
 
