@@ -515,6 +515,7 @@ function getHistory() {
 function markDirty() {
   try { localStorage.setItem('dgt_dirty', '1'); } catch (e) {}
   window.__localWriteSeq = (window.__localWriteSeq || 0) + 1;
+  try { document.dispatchEvent(new Event('dgt-dirty')); } catch (e) {}
 }
 function saveHistory(h) { localStorage.setItem('dgt_test_history', JSON.stringify(h)); markDirty(); }
 
@@ -1027,32 +1028,110 @@ var _testFileCache = {};    // test_num -> questions array
 var _testFilePending = {};  // test_num -> Promise (dedupe concurrent fetches)
 var _imgCache = {};         // pregunta_id -> base64 string
 
+// ---- 离线图片包（IndexedDB）：把错题图片存到本机，断网也能看 ----
+var _offlineDB = null;
+function openOfflineDB() {
+  if (_offlineDB) return _offlineDB;
+  _offlineDB = new Promise(function (res, rej) {
+    var req;
+    try { req = indexedDB.open('dgt_offline', 1); } catch (e) { rej(e); return; }
+    req.onupgradeneeded = function () { req.result.createObjectStore('imgs'); };
+    req.onsuccess = function () { res(req.result); };
+    req.onerror = function () { rej(req.error); };
+  });
+  return _offlineDB;
+}
+function offlineImgGet(pid) {
+  return openOfflineDB().then(function (db) {
+    return new Promise(function (res, rej) {
+      var r = db.transaction('imgs', 'readonly').objectStore('imgs').get(String(pid));
+      r.onsuccess = function () { res(r.result || null); };
+      r.onerror = function () { rej(r.error); };
+    });
+  });
+}
+function offlineImgPutMany(map) {
+  return openOfflineDB().then(function (db) {
+    return new Promise(function (res, rej) {
+      var tx = db.transaction('imgs', 'readwrite');
+      var st = tx.objectStore('imgs');
+      Object.keys(map).forEach(function (k) { st.put(map[k], k); });
+      tx.oncomplete = function () { res(); };
+      tx.onerror = function () { rej(tx.error); };
+    });
+  });
+}
+
+// 把错题本里所有带图片的题缓存到本机（按 test 分文件下载，逐题存 IndexedDB）
+function downloadOfflineImages(progressCb) {
+  var coll = getWrongCollection();
+  var entries = Object.keys(coll).map(function (k) { return coll[k]; })
+    .filter(function (w) { return w && w.tiene_imagen && w.test_num; });
+  var byTest = {};
+  entries.forEach(function (w) {
+    var tn = String(parseInt(w.test_num, 10));
+    (byTest[tn] = byTest[tn] || []).push(String(w.pregunta_id));
+  });
+  var testNums = Object.keys(byTest);
+  var done = 0, saved = 0;
+  var chain = Promise.resolve();
+  testNums.forEach(function (tn) {
+    chain = chain.then(function () {
+      var fname = 'tests/test_' + String(tn).padStart(3, '0') + '.json';
+      return fetch(fname).then(function (r) { return r.json(); }).then(function (arr) {
+        var want = {};
+        byTest[tn].forEach(function (id) { want[id] = 1; });
+        var batch = {};
+        arr.forEach(function (q) {
+          var id = String(q.pregunta_id);
+          if (want[id] && q.imagen_base64) batch[id] = q.imagen_base64;
+        });
+        return offlineImgPutMany(batch).then(function () { saved += Object.keys(batch).length; });
+      }).catch(function () { /* 单个文件失败就跳过，下次再补 */ }).then(function () {
+        done++;
+        if (progressCb) progressCb(done, testNums.length, saved);
+      });
+    });
+  });
+  return chain.then(function () {
+    return { total: entries.length, saved: saved, files: testNums.length };
+  });
+}
+
 function getWrongImageDataURI(wq, cb) {
   var pid = String(wq.pregunta_id);
   if (wq.imagen_base64) { cb('data:image/jpeg;base64,' + wq.imagen_base64); return; }
   if (_imgCache[pid]) { cb('data:image/jpeg;base64,' + _imgCache[pid]); return; }
   var tn = parseInt(wq.test_num, 10);
-  if (!tn) { cb(null); return; }
-  function resolve(arr) {
-    var q = arr.find(function(x){ return String(x.pregunta_id) === pid; });
-    if (q && q.imagen_base64) {
-      _imgCache[pid] = q.imagen_base64;
-      cb('data:image/jpeg;base64,' + q.imagen_base64);
-    } else {
-      cb(null);
+  // 先看本机离线包，没有再联网
+  offlineImgGet(pid).then(function (b64) {
+    if (b64) { _imgCache[pid] = b64; cb('data:image/jpeg;base64,' + b64); }
+    else fetchImage();
+  }).catch(fetchImage);
+
+  function fetchImage() {
+    if (!tn) { cb(null); return; }
+    function resolve(arr) {
+      var q = arr.find(function(x){ return String(x.pregunta_id) === pid; });
+      if (q && q.imagen_base64) {
+        _imgCache[pid] = q.imagen_base64;
+        cb('data:image/jpeg;base64,' + q.imagen_base64);
+      } else {
+        cb(null);
+      }
     }
+    if (_testFileCache[tn]) { resolve(_testFileCache[tn]); return; }
+    if (!_testFilePending[tn]) {
+      var fname = 'tests/test_' + String(tn).padStart(3, '0') + '.json';
+      _testFilePending[tn] = fetch(fname).then(function(r){ return r.json(); }).then(function(arr){
+        _testFileCache[tn] = arr;
+        return arr;
+      }).catch(function(){ return null; });
+    }
+    _testFilePending[tn].then(function(arr){
+      if (arr) resolve(arr); else cb(null);
+    });
   }
-  if (_testFileCache[tn]) { resolve(_testFileCache[tn]); return; }
-  if (!_testFilePending[tn]) {
-    var fname = 'tests/test_' + String(tn).padStart(3, '0') + '.json';
-    _testFilePending[tn] = fetch(fname).then(function(r){ return r.json(); }).then(function(arr){
-      _testFileCache[tn] = arr;
-      return arr;
-    }).catch(function(){ return null; });
-  }
-  _testFilePending[tn].then(function(arr){
-    if (arr) resolve(arr); else cb(null);
-  });
 }
 
 function escapeHtml(str) {
@@ -1816,16 +1895,66 @@ window.exportPDF=function(){
   };
 
   // ---- 右下角同步按钮 ----
+  function renderSyncBtn() {
+    var b = document.getElementById('btn-sync');
+    if (!b || b.disabled) return;
+    var dirty = isDirty();
+    b.innerHTML = '☁️' + (dirty
+      ? '<span style="position:absolute;top:-2px;right:-2px;width:14px;height:14px;border-radius:50%;background:#e53e3e;border:2px solid #fff;box-sizing:border-box"></span>'
+      : '');
+    b.title = dirty ? '有未同步的本地记录，点我同步' : '同步（先拉云端，再上传本地）';
+  }
+
   function addButton() {
     if (document.getElementById('btn-sync')) return;
     var b = document.createElement('button');
-    b.id = 'btn-sync'; b.textContent = '☁️'; b.title = '同步到云端';
+    b.id = 'btn-sync';
     b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;width:52px;height:52px;border-radius:50%;border:none;background:var(--primary,#2b6cb0);color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3)';
     b.onclick = function () {
       b.textContent = '⏳'; b.disabled = true;
       window.syncPush(function (err) {
-        if (err) alert('同步失败，请检查网络或 token。');
-        b.textContent = '☁️'; b.disabled = false;
+        b.disabled = false;
+        renderSyncBtn();
+        if (err) {
+          var msg = String((err && err.message) || '');
+          if (!navigator.onLine || /Failed to fetch|NetworkError|load failed/i.test(msg)) {
+            showToast('没网，记录已保存在本机');
+          } else {
+            showToast('同步失败，请检查网络或 token');
+          }
+        } else {
+          showToast('已同步到云端');
+        }
+      });
+    };
+    document.body.appendChild(b);
+    renderSyncBtn();
+  }
+
+  // ---- 离线图片包按钮 ----
+  function addOfflineButton() {
+    if (document.getElementById('btn-offline')) return;
+    var b = document.createElement('button');
+    b.id = 'btn-offline'; b.textContent = '⬇️';
+    b.title = '下载错题图片，断网也能刷题';
+    b.style.cssText = 'position:fixed;right:16px;bottom:80px;z-index:9999;width:52px;height:52px;border-radius:50%;border:none;background:#2f855a;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3)';
+    b.onclick = function () {
+      if (b.disabled) return;
+      var coll = getWrongCollection();
+      var n = Object.keys(coll).filter(function (k) { return coll[k] && coll[k].tiene_imagen; }).length;
+      if (!n) { showToast('错题本是空的'); return; }
+      var mb = Math.max(1, Math.round(n * 0.065));
+      if (!confirm('把 ' + n + ' 道错题的图片存到本机？约 ' + mb + ' MB，建议在 Wi-Fi 下下载。')) return;
+      b.disabled = true; b.textContent = '0%';
+      downloadOfflineImages(function (done, total) {
+        b.textContent = Math.round(done / total * 100) + '%';
+      }).then(function (r) {
+        b.disabled = false; b.textContent = '✅';
+        showToast('离线包完成：' + r.saved + '/' + r.total + ' 道题');
+        setTimeout(function () { b.textContent = '⬇️'; }, 3000);
+      }).catch(function (e) {
+        b.disabled = false; b.textContent = '⬇️';
+        showToast('下载失败：' + ((e && e.message) || '未知错误'));
       });
     };
     document.body.appendChild(b);
@@ -1851,8 +1980,11 @@ window.exportPDF=function(){
 
   window.__onUnlock = function () { tryAutoSync(); };
 
+  document.addEventListener('dgt-dirty', renderSyncBtn);
+
   tryAutoSync();
   addButton();
+  addOfflineButton();
 })();
 </script>
 
