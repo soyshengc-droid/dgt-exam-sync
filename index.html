@@ -538,6 +538,7 @@ function makeWrongEntry(q) {
     times_wrong: 0,
     times_correct: 0,
     last_wrong: null,
+    updated_at: null,   // 最后修改时间：双向同步按它判断哪一版最新
   };
 }
 
@@ -564,12 +565,14 @@ function recomputeWrongCollection() {
       if (inBook) {
         if (!wrongColl[key]) wrongColl[key] = makeWrongEntry(q);
         wrongColl[key].times_correct = baseC + 1;
+        wrongColl[key].updated_at = answerTimes[i] || now;
       }
     } else {
       // 答错：确保在错题本里并累计"错了几次"。
       if (!wrongColl[key]) wrongColl[key] = makeWrongEntry(q);
       wrongColl[key].times_wrong = baseW + 1;
       wrongColl[key].last_wrong = answerTimes[i] || now;
+      wrongColl[key].updated_at = answerTimes[i] || now;
     }
   });
   return wrongColl;
@@ -1768,19 +1771,35 @@ window.exportPDF=function(){
   function mergeWrong(a, b) {
     var out = {}, k;
     for (k in a) out[k] = a[k];
-    for (k in b) { var x = out[k], y = b[k];
-      if (!x) out[k] = y;
-      else if (y) {
-        var tx = (x.times_wrong || 0), ty = (y.times_wrong || 0);
-        var keep = (ty > tx || (ty === tx && (y.last_wrong || '') > (x.last_wrong || ''))) ? y : x;
-        var merged = {};
-        for (var f in keep) merged[f] = keep[f];
-        merged.times_wrong = Math.max(tx, ty);
-        merged.times_correct = Math.max(x.times_correct || 0, y.times_correct || 0);
-        merged.last_wrong = (x.last_wrong || '') > (y.last_wrong || '') ? (x.last_wrong || '') : (y.last_wrong || '');
-        out[k] = merged;
-      } }
+    for (k in b) {
+      var x = out[k], y = b[k];
+      if (!y) continue;
+      if (!x) { out[k] = y; continue; }
+      var mx = x.updated_at ? Date.parse(x.updated_at) : 0;
+      var my = y.updated_at ? Date.parse(y.updated_at) : 0;
+      if (mx && my && mx !== my) {
+        // 两边都有修改时间：以最后改的那一版为准
+        out[k] = mx > my ? x : y;
+        continue;
+      }
+      // 旧数据（还没有 updated_at）：取次数总和大的一版，避免升级后倒退
+      var cx = (x.times_wrong || 0) + (x.times_correct || 0);
+      var cy = (y.times_wrong || 0) + (y.times_correct || 0);
+      if (cy > cx) out[k] = y;
+      else if (cy === cx && (y.last_wrong || '') > (x.last_wrong || '')) out[k] = y;
+    }
     return out;
+  }
+  // 排序后的稳定序列化，用来判断"合并后云端有没有变化"
+  function stableStr(o) {
+    return JSON.stringify(o, function (k, v) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        var s = {};
+        Object.keys(v).sort().forEach(function (kk) { s[kk] = v[kk]; });
+        return s;
+      }
+      return v;
+    });
   }
   function readLocal() {
     var h = {}, w = {};
@@ -1879,10 +1898,18 @@ window.exportPDF=function(){
         .then(function (remote) {
           var cloud = { h: {}, w: {} };
           try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
+          var cloudNorm = { h: cloud.h || {}, w: cloud.w || {} };
           var local = readLocal();
-          var merged = { h: mergeHist(cloud.h || {}, local.h), w: mergeWrong(cloud.w || {}, local.w) };
+          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(cloudNorm.w, local.w) };
           writeLocal(merged);
           refreshUI();
+          if (stableStr(merged) === stableStr(cloudNorm)) {
+            // 云端已经是最新的，不用再产生一个 commit
+            if ((window.__localWriteSeq || 0) === seq0) clearDirty();
+            console.log('☁️ 本地与云端一致');
+            if (done) done(null);
+            return;
+          }
           var body = JSON.stringify({ message: 'sync ' + new Date().toISOString(), content: enc(JSON.stringify(merged)), sha: remote.sha, branch: BRANCH });
           return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
         })
@@ -1961,9 +1988,8 @@ window.exportPDF=function(){
   }
 
   function appUnlocked() { try { return localStorage.getItem('dgt_app_unlocked') === '1'; } catch (e) { return false; } }
-  function doSync() {
-    if (isDirty()) { window.syncPush(); } else { window.syncPull(); }
-  }
+  // 双向同步：先拉云端，合并（每条以最后修改的为准），再把本地新记录推上去
+  function doSync() { window.syncPush(); }
   function tryAutoSync() {
     if (hasToken()) { doSync(); }
     else if (appUnlocked()) { ensureToken(function (t) { if (t) doSync(); }); }
