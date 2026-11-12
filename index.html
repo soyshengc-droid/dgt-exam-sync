@@ -286,6 +286,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     <button class="btn btn-outline btn-sm" onclick="showPage('home')">📋 Tests</button>
     <button class="btn btn-outline btn-sm" onclick="showPage('stats')">📊 Estadísticas</button>
     <button class="btn btn-sm" id="btn-fallos-header" style="background:#fef3c7;color:#92400e;border:2px solid #f59e0b" onclick="showWrongCollection()">📝 Fallos <span id="wrong-count-h">0</span></button>
+    <button class="btn btn-outline btn-sm" id="btn-sync-header" title="同步到云端">☁️ Sync</button>
   </div>
 </header>
 
@@ -2018,40 +2019,54 @@ window.exportPDF=function(){
     });
   };
 
-  // ---- 右下角同步按钮 ----
+  // ---- 同步按钮（顶栏 + 右下角悬浮） ----
   function renderSyncBtn() {
-    var b = document.getElementById('btn-sync');
-    if (!b || b.disabled) return;
     var dirty = isDirty();
-    b.innerHTML = '☁️' + (dirty
-      ? '<span style="position:absolute;top:-2px;right:-2px;width:14px;height:14px;border-radius:50%;background:#e53e3e;border:2px solid #fff;box-sizing:border-box"></span>'
-      : '');
-    b.title = dirty ? '有未同步的本地记录，点我同步' : '同步（先拉云端，再上传本地）';
+    var b = document.getElementById('btn-sync');
+    if (b && !b.disabled) {
+      b.innerHTML = '☁️' + (dirty
+        ? '<span style="position:absolute;top:-2px;right:-2px;width:14px;height:14px;border-radius:50%;background:#e53e3e;border:2px solid #fff;box-sizing:border-box"></span>'
+        : '');
+      b.title = dirty ? '有未同步的本地记录，点我同步' : '同步（先拉云端，再上传本地）';
+    }
+    var h = document.getElementById('btn-sync-header');
+    if (h && !h.disabled) {
+      h.innerHTML = '☁️ Sync' + (dirty ? ' <span style="color:#e53e3e;font-weight:700">●</span>' : '');
+      h.title = dirty ? '有未同步的本地记录，点我同步' : '同步（先拉云端，再上传本地）';
+    }
+  }
+
+  function startSync(btn, fab) {
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = fab ? '⏳' : '⏳ Sync';
+    window.syncPush(function (err) {
+      btn.disabled = false;
+      renderSyncBtn();
+      if (err) {
+        var msg = String((err && err.message) || '');
+        if (!navigator.onLine || /Failed to fetch|NetworkError|load failed/i.test(msg)) {
+          showToast('没网，记录已保存在本机');
+        } else {
+          showToast('同步失败，请检查网络或 token');
+        }
+      } else {
+        showToast('已同步到云端');
+      }
+    });
   }
 
   function addButton() {
-    if (document.getElementById('btn-sync')) return;
-    var b = document.createElement('button');
-    b.id = 'btn-sync';
-    b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;width:52px;height:52px;border-radius:50%;border:none;background:var(--primary,#2b6cb0);color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3)';
-    b.onclick = function () {
-      b.textContent = '⏳'; b.disabled = true;
-      window.syncPush(function (err) {
-        b.disabled = false;
-        renderSyncBtn();
-        if (err) {
-          var msg = String((err && err.message) || '');
-          if (!navigator.onLine || /Failed to fetch|NetworkError|load failed/i.test(msg)) {
-            showToast('没网，记录已保存在本机');
-          } else {
-            showToast('同步失败，请检查网络或 token');
-          }
-        } else {
-          showToast('已同步到云端');
-        }
-      });
-    };
-    document.body.appendChild(b);
+    if (!document.getElementById('btn-sync')) {
+      var b = document.createElement('button');
+      b.id = 'btn-sync';
+      b.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;width:52px;height:52px;border-radius:50%;border:none;background:var(--primary,#2b6cb0);color:#fff;font-size:22px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3)';
+      b.onclick = function () { startSync(b, true); };
+      document.body.appendChild(b);
+    }
+    // 顶栏的 ☁️ Sync 按钮（本地/线上都有）
+    var h = document.getElementById('btn-sync-header');
+    if (h && !h.__wired) { h.__wired = true; h.onclick = function () { startSync(h, false); }; }
     renderSyncBtn();
   }
 
