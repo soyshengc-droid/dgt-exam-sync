@@ -1572,6 +1572,13 @@ function removeFromWrong(preguntaId) {
   delete wrongColl[id];
   saveWrongCollection(wrongColl);
   markWrongDeleted([id]);
+  // 会话基线里也去掉，否则下一次作答会把这道题重新写回本地
+  if (sessionWrongBaseline) delete sessionWrongBaseline[id];
+  // 同步基线里去掉这道题：以后再做错时，这一次会重新累加而不是被删除标记吞掉
+  try {
+    const b = JSON.parse(localStorage.getItem('dgt_sync_base') || '{}');
+    if (b && b[id]) { delete b[id]; localStorage.setItem('dgt_sync_base', JSON.stringify(b)); }
+  } catch (e) {}
   updateWrongBadge();
   closeModal();
   renderWrongCollection();
