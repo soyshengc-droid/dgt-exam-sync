@@ -583,6 +583,32 @@ function commitWrongCollection() {
   updateWrongBadge();
 }
 
+// 同步把"云端合并结果"写进本地后，把本次会话已作答的贡献从基线里扣掉，
+// 保证后续 recompute 只加一次，不会重复累计。
+function rebaseSessionBaseline(mergedW) {
+  if (!sessionWrongBaseline) {
+    try { sessionWrongBaseline = JSON.parse(JSON.stringify(mergedW || {})); } catch (e) { sessionWrongBaseline = {}; }
+    return;
+  }
+  if (!currentQuestions || !currentQuestions.length) return;
+  var contrib = {};
+  currentQuestions.forEach(function (q, i) {
+    var ans = userAnswers[i];
+    if (ans === undefined) return;
+    var k = String(q.pregunta_id);
+    var c = contrib[k] || (contrib[k] = [0, 0]);
+    if (ans === q.respuesta_correcta) c[1]++; else c[0]++;
+  });
+  var nb;
+  try { nb = JSON.parse(JSON.stringify(mergedW || {})); } catch (e) { return; }
+  Object.keys(contrib).forEach(function (k) {
+    if (!nb[k]) return;
+    nb[k].times_wrong = Math.max(0, (nb[k].times_wrong || 0) - contrib[k][0]);
+    nb[k].times_correct = Math.max(0, (nb[k].times_correct || 0) - contrib[k][1]);
+  });
+  sessionWrongBaseline = nb;
+}
+
 // 有 token 时才做防抖云同步，避免每答一题就 PUT 一次
 function debouncedSyncWrong() {
   var hasToken = false;
@@ -1768,27 +1794,61 @@ window.exportPDF=function(){
       else if (y && (y.date || '') > (x.date || '')) out[k] = y; }
     return out;
   }
-  function mergeWrong(a, b) {
-    var out = {}, k;
-    for (k in a) out[k] = a[k];
-    for (k in b) {
-      var x = out[k], y = b[k];
-      if (!y) continue;
-      if (!x) { out[k] = y; continue; }
-      var mx = x.updated_at ? Date.parse(x.updated_at) : 0;
-      var my = y.updated_at ? Date.parse(y.updated_at) : 0;
-      if (mx && my && mx !== my) {
-        // 两边都有修改时间：以最后改的那一版为准
-        out[k] = mx > my ? x : y;
-        continue;
+  // 增量合并：base = 本机上次同步成功时已上传的计数，cloud = 云端，local = 本机。
+  // 合并结果 = 云端 + (本机 - base)，即两边的作答次数相加，不会重复计数。
+  // base 里没有的题（首次同步/新题）退回取两边较大值，避免升级后重复计数。
+  function mergeWrong(base, cloud, local) {
+    var out = {}, keys = {}, id;
+    for (id in (cloud || {})) keys[id] = 1;
+    for (id in (local || {})) keys[id] = 1;
+    Object.keys(keys).forEach(function (id) {
+      var c = cloud && cloud[id];
+      var l = local && local[id];
+      if (!l) { out[id] = c; return; }
+      if (!c) { out[id] = l; return; }
+      var merged = {};
+      var f;
+      for (f in c) merged[f] = c[f];
+      for (f in l) if (merged[f] === undefined || merged[f] === null) merged[f] = l[f];
+
+      var cw = c.times_wrong || 0, cc = c.times_correct || 0;
+      var lw = l.times_wrong || 0, lc = l.times_correct || 0;
+      if (!base) {
+        // 首次启用"整合式"同步：取两边较大值，避免把历史数据重复累加
+        merged.times_wrong = Math.max(cw, lw);
+        merged.times_correct = Math.max(cc, lc);
+      } else {
+        var b = base[id];
+        if (b) {
+          merged.times_wrong = cw + Math.max(0, lw - (b[0] || 0));
+          merged.times_correct = cc + Math.max(0, lc - (b[1] || 0));
+        } else {
+          // 基线里没有此题：说明是上次同步后两边各自新增的，次数相加
+          merged.times_wrong = cw + lw;
+          merged.times_correct = cc + lc;
+        }
       }
-      // 旧数据（还没有 updated_at）：取次数总和大的一版，避免升级后倒退
-      var cx = (x.times_wrong || 0) + (x.times_correct || 0);
-      var cy = (y.times_wrong || 0) + (y.times_correct || 0);
-      if (cy > cx) out[k] = y;
-      else if (cy === cx && (y.last_wrong || '') > (x.last_wrong || '')) out[k] = y;
-    }
+      merged.last_wrong = (l.last_wrong || '') > (c.last_wrong || '') ? l.last_wrong : c.last_wrong;
+      merged.updated_at = (l.updated_at || '') > (c.updated_at || '') ? l.updated_at : c.updated_at;
+      out[id] = merged;
+    });
     return out;
+  }
+  // 同步基线：只存计数 [times_wrong, times_correct]
+  var BASE_KEY = 'dgt_sync_base';
+  function readBase() {
+    try {
+      var b = JSON.parse(localStorage.getItem(BASE_KEY) || 'null');
+      return (b && typeof b === 'object' && !Array.isArray(b)) ? b : null;
+    } catch (e) { return null; }
+  }
+  function writeBase(w) {
+    var out = {};
+    for (var id in (w || {})) {
+      var e = w[id] || {};
+      out[id] = [e.times_wrong || 0, e.times_correct || 0];
+    }
+    try { localStorage.setItem(BASE_KEY, JSON.stringify(out)); } catch (e) {}
   }
   // 排序后的稳定序列化，用来判断"合并后云端有没有变化"
   function stableStr(o) {
@@ -1877,7 +1937,7 @@ window.exportPDF=function(){
           var cloud = { h: {}, w: {} };
           try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
           var local = readLocal();
-          writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(local.w, cloud.w || {}) });
+          writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(null, cloud.w || {}, local.w) });
           refreshUI();
           console.log('☁️ 已从云端拉取');
           if (done) done(null);
@@ -1891,7 +1951,6 @@ window.exportPDF=function(){
 
   window.syncPush = function (done) {
     ensureToken(function (token) {
-      var seq0 = window.__localWriteSeq || 0;
       var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
       fetch(API_URL, { headers: H })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -1899,24 +1958,62 @@ window.exportPDF=function(){
           var cloud = { h: {}, w: {} };
           try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
           var cloudNorm = { h: cloud.h || {}, w: cloud.w || {} };
+          var seq0 = window.__localWriteSeq || 0;
           var local = readLocal();
-          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(cloudNorm.w, local.w) };
-          writeLocal(merged);
-          refreshUI();
+          // 云端 + 本机自上次同步以来的增量 = 两边作答次数相加
+          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(readBase(), cloudNorm.w, local.w) };
+
+          function finishSync() {
+            var finalW = merged.w;
+            var seqNow = window.__localWriteSeq || 0;
+            if (seqNow !== seq0) {
+              // 同步期间用户又答了题：把这段新增量补到本地，下一次同步再上传
+              var local2 = readLocal();
+              finalW = JSON.parse(JSON.stringify(merged.w));
+              Object.keys(local2.w || {}).forEach(function (id) {
+                var b = local2.w[id];
+                if (!b) return;
+                var a = local.w[id];
+                var dw = Math.max(0, (b.times_wrong || 0) - (a ? (a.times_wrong || 0) : 0));
+                var dc = Math.max(0, (b.times_correct || 0) - (a ? (a.times_correct || 0) : 0));
+                if (!finalW[id]) { finalW[id] = JSON.parse(JSON.stringify(b)); return; }
+                if (!dw && !dc) return;
+                finalW[id] = JSON.parse(JSON.stringify(finalW[id]));
+                finalW[id].times_wrong = (finalW[id].times_wrong || 0) + dw;
+                finalW[id].times_correct = (finalW[id].times_correct || 0) + dc;
+              });
+            }
+            writeLocal({ h: merged.h, w: finalW });
+            if (typeof rebaseSessionBaseline === 'function') rebaseSessionBaseline(finalW);
+            refreshUI();
+            // 基线记录"云端已收到的版本"；本地可能领先它，下次同步补传
+            writeBase(merged.w);
+            if ((window.__localWriteSeq || 0) === seq0) {
+              clearDirty();
+            } else {
+              setTimeout(function () { try { window.syncPush(); } catch (e) {} }, 2000);
+            }
+          }
+
           if (stableStr(merged) === stableStr(cloudNorm)) {
             // 云端已经是最新的，不用再产生一个 commit
-            if ((window.__localWriteSeq || 0) === seq0) clearDirty();
+            finishSync();
             console.log('☁️ 本地与云端一致');
             if (done) done(null);
             return;
           }
           var body = JSON.stringify({ message: 'sync ' + new Date().toISOString(), content: enc(JSON.stringify(merged)), sha: remote.sha, branch: BRANCH });
-          return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body });
+          return fetch(API_URL, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }, body: body })
+            .then(function (r) {
+              if (!r.ok) throw new Error('HTTP ' + r.status);
+              finishSync();
+              console.log('☁️ 已上传到云端');
+              if (done) done(null);
+            });
         })
-        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); if ((window.__localWriteSeq || 0) === seq0) clearDirty(); console.log('☁️ 已上传到云端'); if (done) done(null); })
         .catch(function (e) {
           if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(null); }; }
-          else { console.error('上传云端失败:', e); if (done) done(e); }
+          else { console.error('同步失败:', e); if (done) done(e); }
         });
     });
   };
