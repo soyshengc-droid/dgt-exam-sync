@@ -622,13 +622,15 @@ function rebaseSessionBaseline(mergedW) {
   sessionWrongBaseline = nb;
 }
 
-// 有 token 时才做防抖云同步，避免每答一题就 PUT 一次
+// 有 token 时才做防抖云同步。sync.json 现在约 0.9MB，每次同步要下载+上传各一遍，
+// 所以等待 15 秒空闲才上传（连续作答时一直顺延），避免每题都产生一个 commit。
+// 本地记录是即时的；关掉页面/断网也不会丢，下次打开或按 ☁️ 会补传。
 function debouncedSyncWrong() {
   var hasToken = false;
   try { hasToken = !!localStorage.getItem('dgt_github_token'); } catch (e) {}
   if (!hasToken || typeof syncPush !== 'function') return;
   clearTimeout(_syncWrongTimer);
-  _syncWrongTimer = setTimeout(function () { try { syncPush(); } catch (e) {} }, 2000);
+  _syncWrongTimer = setTimeout(function () { try { syncPush(); } catch (e) {} }, 15000);
 }
 
 // ==================== NAVIGATION ====================
@@ -1823,9 +1825,10 @@ window.exportPDF=function(){
       else if (y && (y.date || '') > (x.date || '')) out[k] = y; }
     return out;
   }
-  // 增量合并：base = 本机上次同步成功时已上传的计数，cloud = 云端，local = 本机。
+  // 增量合并：base = 本机上次同步成功时云端已有的计数，cloud = 云端，local = 本机。
   // 合并结果 = 云端 + (本机 - base)，即两边的作答次数相加，不会重复计数。
-  // base 里没有的题（首次同步/新题）退回取两边较大值，避免升级后重复计数。
+  // 没有 base（升级后第一次同步）时取两边较大值，避免把历史数据重复累加。
+  // base 里没有的题（两边各自新增的）次数直接相加。
   function mergeWrong(base, cloud, local) {
     var out = {}, keys = {}, id;
     for (id in (cloud || {})) keys[id] = 1;
@@ -1966,7 +1969,14 @@ window.exportPDF=function(){
   function hasToken() { try { return !!localStorage.getItem(TOKEN_KEY); } catch (e) { return false; } }
 
   // ---- token 输入弹窗（不用 prompt()，iPhone Safari 也能用）----
-  var pendingTokenCb = null;
+  // 用队列而不是单个回调：同步进行中若又触发一次（解锁/切回前台），
+  // 不能把前一次的回调覆盖掉，否则那个按钮会一直卡在"同步中"。
+  var pendingTokenCbs = [];
+  function flushTokenCbs(token) {
+    var cbs = pendingTokenCbs;
+    pendingTokenCbs = [];
+    cbs.forEach(function (f) { try { f(token); } catch (e) {} });
+  }
   function ensureModal() {
     if (document.getElementById('token-modal')) return;
     var d = document.createElement('div');
@@ -1986,21 +1996,21 @@ window.exportPDF=function(){
       if (!v) { return; }
       try { localStorage.setItem(TOKEN_KEY, v); } catch (e) {}
       hideModal();
-      var cb = pendingTokenCb; pendingTokenCb = null;
-      if (cb) cb(v);
+      flushTokenCbs(v);
     };
     document.getElementById('token-cancel').onclick = function () {
       hideModal();
-      var cb = pendingTokenCb; pendingTokenCb = null;
-      if (cb) cb(null);
+      flushTokenCbs(null);
     };
   }
   function showModal(hint) {
     ensureModal();
+    var d = document.getElementById('token-modal');
+    var alreadyOpen = d && d.style.display === 'flex';
     document.getElementById('token-hint').textContent = hint || TOKEN_HINT;
-    document.getElementById('token-input').value = '';
-    document.getElementById('token-modal').style.display = 'flex';
-    var el = document.getElementById('token-input'); if (el) setTimeout(function () { try { el.focus(); } catch (e) {} }, 50);
+    if (!alreadyOpen) document.getElementById('token-input').value = '';
+    d.style.display = 'flex';
+    var el = document.getElementById('token-input'); if (!alreadyOpen && el) setTimeout(function () { try { el.focus(); } catch (e) {} }, 50);
   }
   function hideModal() { var d = document.getElementById('token-modal'); if (d) d.style.display = 'none'; }
 
@@ -2008,18 +2018,18 @@ window.exportPDF=function(){
     var t = null;
     try { t = localStorage.getItem(TOKEN_KEY); } catch (e) {}
     if (t) { cb(t); return; }
-    pendingTokenCb = cb;
+    pendingTokenCbs.push(cb);
     showModal();
   }
 
   // ---- 拉取 / 上传 ----
   window.syncPull = function (done) {
     ensureToken(function (token) {
-      fetch(API_URL + '?t=' + Date.now(), { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' } })
+      var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
+      fetch(API_URL + '?t=' + Date.now(), { headers: H, cache: 'no-store' })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-        .then(function (remote) {
-          var cloud = { h: {}, w: {} };
-          try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
+        .then(function (remote) { return readCloud(remote, H); })
+        .then(function (cloud) {
           var local = readLocal();
           writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(null, cloud.w || {}, local.w) });
           refreshUI();
@@ -2027,7 +2037,7 @@ window.exportPDF=function(){
           if (done) done(null);
         })
         .catch(function (e) {
-          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPull(done); else if (done) done(null); }; }
+          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCbs.push(function (t) { if (t) window.syncPull(done); else if (done) done(null); }); }
           else { console.warn('拉取云端失败（可忽略）:', e); if (done) done(e); }
         });
     });
@@ -2036,7 +2046,9 @@ window.exportPDF=function(){
   window.syncPush = function (done, retry) {
     ensureToken(function (token) {
       var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
-      fetch(API_URL, { headers: H })
+      // GitHub API 响应带 Cache-Control: max-age=60，无参数时浏览器会拿缓存里的旧文件
+      // （sha 也是旧的 → PUT 409）。加时间戳强制取最新。
+      fetch(API_URL + '?t=' + Date.now(), { headers: H, cache: 'no-store' })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(function (remote) {
           return readCloud(remote, H).then(function (cloud) { return { remote: remote, cloud: cloud }; });
@@ -2106,7 +2118,7 @@ window.exportPDF=function(){
             });
         })
         .catch(function (e) {
-          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(new Error('已取消同步')); }; }
+          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCbs.push(function (t) { if (t) window.syncPush(done); else if (done) done(new Error('已取消同步')); }); }
           else if (/HTTP 409/.test(String(e && e.message)) && (retry || 0) < 2) {
             // 另一台设备刚好也在写：重新拉一遍再合并，避免把这次改动弄丢
             console.warn('云端刚被其他设备更新，2 秒后重试:', e);
