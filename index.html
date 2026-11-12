@@ -1875,6 +1875,11 @@ window.exportPDF=function(){
   function refreshUI() {
     if (typeof updateWrongBadge === 'function') updateWrongBadge();
     if (typeof renderHome === 'function') renderHome();
+    // 当前正停留在哪一页，就把哪一页的数据也刷新掉（否则同步后统计数字不变）
+    try {
+      if (currentPage === 'wrong' && typeof renderWrongCollection === 'function') renderWrongCollection();
+      if (currentPage === 'stats' && typeof renderStatistics === 'function') renderStatistics();
+    } catch (e) {}
   }
   function isAuthErr(e) { return !!(e && e.message && /401|403|404/.test(e.message)); }
   // ---- 离线标记：本地有未上传的改动 ----
