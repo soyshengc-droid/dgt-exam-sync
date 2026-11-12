@@ -525,6 +525,18 @@ function getWrongCollection() {
 }
 function saveWrongCollection(w) { localStorage.setItem('dgt_wrong_collection', JSON.stringify(w)); markDirty(); }
 
+// 删除标记（tombstone）：只删本地的话，下次同步会被云端"复活"。
+// 记录被移出错题本的题号，随 sync.json 一起上传；之后如果又答过这道题，会重新加回。
+function getWrongDeleted() {
+  try { return JSON.parse(localStorage.getItem('dgt_wrong_deleted') || '{}') || {}; } catch (e) { return {}; }
+}
+function markWrongDeleted(ids) {
+  const d = getWrongDeleted(), now = new Date().toISOString();
+  (ids || []).forEach(function (id) { d[String(id)] = now; });
+  try { localStorage.setItem('dgt_wrong_deleted', JSON.stringify(d)); } catch (e) {}
+  markDirty();
+}
+
 function makeWrongEntry(q) {
   return {
     pregunta_id: q.pregunta_id,
@@ -1556,8 +1568,10 @@ function reviewWrongQuestion(preguntaId) {
 
 function removeFromWrong(preguntaId) {
   const wrongColl = getWrongCollection();
-  delete wrongColl[String(preguntaId)];
+  const id = String(preguntaId);
+  delete wrongColl[id];
   saveWrongCollection(wrongColl);
+  markWrongDeleted([id]);
   updateWrongBadge();
   closeModal();
   renderWrongCollection();
@@ -1566,7 +1580,13 @@ function removeFromWrong(preguntaId) {
 
 function clearWrongCollection() {
   if (confirm('¿Borrar toda la colección de fallos? Esta acción no se puede deshacer.')) {
+    const ids = Object.keys(getWrongCollection());
     saveWrongCollection({});
+    markWrongDeleted(ids);
+    // 重置本次会话的基线：否则下一次作答会把整本错题按旧基线重新写回来
+    sessionWrongBaseline = {};
+    // 清空后本地计数从零开始，基线也要归零（清空后新答的题才能正常累加）
+    try { localStorage.setItem('dgt_sync_base', '{}'); } catch (e) {}
     updateWrongBadge();
     renderWrongCollection();
     showToast('Colección de fallos borrada');
@@ -1781,6 +1801,7 @@ window.exportPDF=function(){
 (function () {
   var OWNER = 'soyshengc-droid', REPO = 'dgt-sync-data', BRANCH = 'main', FILE = 'sync.json';
   var API_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/contents/' + FILE;
+  var BLOB_URL = 'https://api.github.com/repos/' + OWNER + '/' + REPO + '/git/blobs/';
   var TOKEN_KEY = 'dgt_github_token';
   var TOKEN_HINT = '需要一个以 github_pat_ 开头的 Fine-grained token，且对私有仓库 ' + OWNER + '/' + REPO + ' 有「Contents: Read and write」权限。每台设备只需一次。';
 
@@ -1862,15 +1883,65 @@ window.exportPDF=function(){
       return v;
     });
   }
+  // sync.json 超过 1MB 后，Contents API 不再返回 content（encoding: none）。
+  // 这种情况必须改用 blobs API；绝不能当成"云端是空的"，否则会把云端数据覆盖掉。
+  function readCloud(remote, H) {
+    if (remote && remote.content) {
+      try { return Promise.resolve(JSON.parse(dec(remote.content))); }
+      catch (e) { return Promise.reject(new Error('云端数据格式错误')); }
+    }
+    if (!remote || !remote.size) return Promise.resolve({ h: {}, w: {}, d: {} });
+    return fetch(BLOB_URL + remote.sha, { headers: H })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (b) {
+        if (!b || !b.content) throw new Error('云端数据过大，读取失败');
+        try { return JSON.parse(dec(b.content)); }
+        catch (e) { throw new Error('云端数据格式错误'); }
+      });
+  }
   function readLocal() {
-    var h = {}, w = {};
+    var h = {}, w = {}, d = {};
     try { h = JSON.parse(localStorage.getItem('dgt_test_history') || '{}'); } catch (e) {}
     try { w = JSON.parse(localStorage.getItem('dgt_wrong_collection') || '{}'); } catch (e) {}
-    return { h: h, w: w };
+    try { d = JSON.parse(localStorage.getItem('dgt_wrong_deleted') || '{}') || {}; } catch (e) {}
+    return { h: h, w: w, d: d };
   }
   function writeLocal(d) {
     if (d.h) localStorage.setItem('dgt_test_history', JSON.stringify(d.h));
     if (d.w) localStorage.setItem('dgt_wrong_collection', JSON.stringify(d.w));
+    if (d.d) localStorage.setItem('dgt_wrong_deleted', JSON.stringify(d.d));
+  }
+  // 删除标记合并：两边取并集
+  function mergeDeleted(cd, ld) {
+    var out = {}, k;
+    for (k in (cd || {})) out[k] = cd[k];
+    for (k in (ld || {})) if (!out[k]) out[k] = ld[k];
+    return out;
+  }
+  // 应用删除标记：本机自上次同步以来又答过这道题（计数有增量）就"复活"，
+  // 否则从合并结果里删掉。这样"移出错题本 / 清空错题本"同步后依然生效。
+  function applyDeletions(del, base, lw, out) {
+    var revived = {};
+    Object.keys(del || {}).forEach(function (id) {
+      var l = lw && lw[id];
+      var b = base && base[id];
+      var dw = 0, dc = 0;
+      if (l) {
+        if (!base) { dw = 1; }
+        else {
+          dw = Math.max(0, (l.times_wrong || 0) - (b ? (b[0] || 0) : 0));
+          dc = Math.max(0, (l.times_correct || 0) - (b ? (b[1] || 0) : 0));
+        }
+      }
+      if (dw > 0 || dc > 0) {
+        revived[id] = 1;
+        delete del[id];
+        if (!out[id] && l) out[id] = JSON.parse(JSON.stringify(l));
+        return;
+      }
+      delete out[id];
+    });
+    return revived;
   }
   function refreshUI() {
     if (typeof updateWrongBadge === 'function') updateWrongBadge();
@@ -1955,26 +2026,34 @@ window.exportPDF=function(){
     });
   };
 
-  window.syncPush = function (done) {
+  window.syncPush = function (done, retry) {
     ensureToken(function (token) {
       var H = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
       fetch(API_URL, { headers: H })
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(function (remote) {
-          var cloud = { h: {}, w: {} };
-          try { cloud = JSON.parse(dec(remote.content)); } catch (e) {}
-          var cloudNorm = { h: cloud.h || {}, w: cloud.w || {} };
+          return readCloud(remote, H).then(function (cloud) { return { remote: remote, cloud: cloud }; });
+        })
+        .then(function (res) {
+          var remote = res.remote;
+          var cloud = res.cloud;
+          var cloudNorm = { h: cloud.h || {}, w: cloud.w || {}, d: cloud.d || {} };
           var seq0 = window.__localWriteSeq || 0;
+          var base = readBase();
           var local = readLocal();
           // 云端 + 本机自上次同步以来的增量 = 两边作答次数相加
-          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(readBase(), cloudNorm.w, local.w) };
+          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(base, cloudNorm.w, local.w), d: mergeDeleted(cloudNorm.d, local.d) };
+          // 删除标记：同步后"移出错题本/清空"依然生效（同步期间又答过的会复活）
+          applyDeletions(merged.d, base, local.w, merged.w);
 
           function finishSync() {
             var finalW = merged.w;
+            var finalH = merged.h;
             var seqNow = window.__localWriteSeq || 0;
             if (seqNow !== seq0) {
               // 同步期间用户又答了题：把这段新增量补到本地，下一次同步再上传
               var local2 = readLocal();
+              finalH = mergeHist(merged.h, local2.h || {});
               finalW = JSON.parse(JSON.stringify(merged.w));
               Object.keys(local2.w || {}).forEach(function (id) {
                 var b = local2.w[id];
@@ -1988,8 +2067,10 @@ window.exportPDF=function(){
                 finalW[id].times_wrong = (finalW[id].times_wrong || 0) + dw;
                 finalW[id].times_correct = (finalW[id].times_correct || 0) + dc;
               });
+              // 同步期间若又答了被删掉的题，这里同样让它复活
+              applyDeletions(merged.d, base, local2.w || {}, finalW);
             }
-            writeLocal({ h: merged.h, w: finalW });
+            writeLocal({ h: finalH, w: finalW, d: merged.d });
             if (typeof rebaseSessionBaseline === 'function') rebaseSessionBaseline(finalW);
             refreshUI();
             // 基线记录"云端已收到的版本"；本地可能领先它，下次同步补传
@@ -2018,7 +2099,12 @@ window.exportPDF=function(){
             });
         })
         .catch(function (e) {
-          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(null); }; }
+          if (isAuthErr(e)) { try { localStorage.removeItem(TOKEN_KEY); } catch (x) {} showModal('token 无效或权限不足（' + e.message + '）。请重新粘贴一个对 ' + OWNER + '/' + REPO + ' 有 Contents: Read/Write 权限的 token。'); pendingTokenCb = function (t) { if (t) window.syncPush(done); else if (done) done(new Error('已取消同步')); }; }
+          else if (/HTTP 409/.test(String(e && e.message)) && (retry || 0) < 2) {
+            // 另一台设备刚好也在写：重新拉一遍再合并，避免把这次改动弄丢
+            console.warn('云端刚被其他设备更新，2 秒后重试:', e);
+            setTimeout(function () { window.syncPush(done, (retry || 0) + 1); }, 2000);
+          }
           else { console.error('同步失败:', e); if (done) done(e); }
         });
     });
@@ -2050,7 +2136,9 @@ window.exportPDF=function(){
       renderSyncBtn();
       if (err) {
         var msg = String((err && err.message) || '');
-        if (!navigator.onLine || /Failed to fetch|NetworkError|load failed/i.test(msg)) {
+        if (/已取消/.test(msg)) {
+          showToast('已取消同步');
+        } else if (!navigator.onLine || /Failed to fetch|NetworkError|load failed/i.test(msg)) {
           showToast('没网，记录已保存在本机');
         } else {
           showToast('同步失败，请检查网络或 token');
