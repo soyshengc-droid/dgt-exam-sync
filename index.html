@@ -126,9 +126,10 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .wrong-item:hover{background:#fef2f2}
 .wrong-q-text{flex:1;font-size:14px;margin-right:12px}
 .wrong-q-meta{font-size:12px;color:var(--text2);white-space:nowrap}
+.wrong-date{color:#a0aec0}
 .wrong-times{background:var(--danger);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
 .wrong-correct{background:var(--success);color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;margin-left:4px}
-.wrong-sort{display:flex;gap:8px;margin:4px 0 16px}
+.wrong-sort{display:flex;gap:8px;margin:4px 0 16px;flex-wrap:wrap}
 .wrong-sort-btn{padding:6px 14px;border-radius:var(--radius-sm);border:2px solid #e0e0e0;background:var(--card);cursor:pointer;font-size:13px;font-weight:600;color:var(--text2);transition:all .2s}
 .wrong-sort-btn.active{background:var(--primary);color:#fff;border-color:var(--primary)}
 .wrong-tema{color:var(--text2);font-weight:600;margin-left:6px}
@@ -222,6 +223,10 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
   .option-btn{padding:10px 14px;font-size:14px}
   .result-score{font-size:48px}
   .stats-bar{flex-direction:column}
+  .wrong-item{flex-wrap:wrap;align-items:flex-start}
+  .wrong-q-text{flex:1 1 100%;margin:0 0 8px}
+  .wrong-q-meta{white-space:normal;width:100%}
+  .wrong-sort-btn{padding:6px 10px;font-size:12px}
 }
 
 @media print{
@@ -406,7 +411,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 
   <div class="wrong-stats" id="wrong-stats"></div>
   <div class="wrong-sort" id="wrong-sort">
-    <button class="wrong-sort-btn active" id="sort-times" onclick="setWrongSort('times')">🔢 Por fallos</button>
+    <button class="wrong-sort-btn" id="sort-fecha" onclick="setWrongSort('fecha')">🕒 Recientes</button>
+    <button class="wrong-sort-btn" id="sort-times" onclick="setWrongSort('times')">🔢 Por fallos</button>
     <button class="wrong-sort-btn" id="sort-tema" onclick="setWrongSort('tema')">📚 Por tema</button>
   </div>
   <div id="wrong-content"></div>
@@ -1442,11 +1448,32 @@ function showWrongCollection() {
   showPage('wrong');
 }
 
-let wrongSort = 'times'; // 'times' = 按错题次数从高到低，'tema' = 按主题分组
+let wrongSort = (function () {
+  try {
+    var s = localStorage.getItem('dgt_wrong_sort');
+    return (s === 'times' || s === 'tema' || s === 'fecha') ? s : 'fecha';
+  } catch (e) { return 'fecha'; }
+})(); // 'fecha' = 最近做错的排前面，'times' = 按错题次数从高到低，'tema' = 按主题分组
 
 function setWrongSort(mode) {
   wrongSort = mode;
+  try { localStorage.setItem('dgt_wrong_sort', mode); } catch (e) {}
   renderWrongCollection();
+}
+
+// 错题条目的时间：优先取"最后一次做错"的时间
+function wrongEntryTime(wq) {
+  var t = wq && (wq.last_wrong || wq.updated_at);
+  if (!t) return 0;
+  var v = Date.parse(t);
+  return isNaN(v) ? 0 : v;
+}
+function fmtWrongDate(wq) {
+  var t = wrongEntryTime(wq);
+  if (!t) return '';
+  var d = new Date(t);
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getDate()) + '/' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
 function renderWrongCollection() {
@@ -1475,10 +1502,11 @@ function renderWrongCollection() {
   `;
 
   // Toggle active states
-  const st = document.getElementById('sort-times'), sm = document.getElementById('sort-tema');
-  if (st && sm) {
+  const st = document.getElementById('sort-times'), sm = document.getElementById('sort-tema'), sf = document.getElementById('sort-fecha');
+  if (st && sm && sf) {
     st.classList.toggle('active', wrongSort === 'times');
     sm.classList.toggle('active', wrongSort === 'tema');
+    sf.classList.toggle('active', wrongSort === 'fecha');
   }
 
   let html = '';
@@ -1488,6 +1516,30 @@ function renderWrongCollection() {
       <div class="empty-title">¡No hay fallos!</div>
       <div class="empty-text">No has fallado ninguna pregunta todavía. ¡Sigue practicando!</div>
     </div>`;
+  } else if (wrongSort === 'fecha') {
+    // 按"最后一次做错"的时间从新到旧；没有时间记录的老题排在最后（内部按错题次数降序）
+    const sorted = entries.slice().sort((a, b) => {
+      const ta = wrongEntryTime(a), tb = wrongEntryTime(b);
+      if (tb !== ta) return tb - ta;
+      const wa = a.times_wrong || 0, wb = b.times_wrong || 0;
+      if (wb !== wa) return wb - wa;
+      return String(a.pregunta_id).localeCompare(String(b.pregunta_id), undefined, {numeric:true});
+    });
+    html += `<div class="wrong-list">`;
+    sorted.forEach(wq => {
+      const dt = fmtWrongDate(wq);
+      html += `<div class="wrong-item" onclick="reviewWrongQuestion('${wq.pregunta_id}')">
+        <div class="wrong-q-text">${wq.pregunta}</div>
+        <div class="wrong-q-meta">
+          ${dt ? `<span class="wrong-date">🕒 ${dt}</span> ` : ''}
+          <span class="wrong-times">✗${wq.times_wrong}</span>
+          <span class="wrong-correct">✓${wq.times_correct || 0}</span>
+          <span class="wrong-tema">Tema ${wq.tema || '?'}</span>
+          ${wq.referencia_libro ? ' · ' + wq.referencia_libro : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
   } else if (wrongSort === 'times') {
     // 按错题次数从高到低；并列时对得少的排前面，再按 id 稳定排序
     const sorted = entries.slice().sort((a, b) => {
