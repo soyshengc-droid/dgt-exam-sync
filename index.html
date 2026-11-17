@@ -1461,9 +1461,9 @@ function setWrongSort(mode) {
   renderWrongCollection();
 }
 
-// 错题条目的时间：优先取"最后一次做错"的时间
+// "Recientes" 只看最后一次做错的时间（做对不会让题目往上跑）
 function wrongEntryTime(wq) {
-  var t = wq && (wq.last_wrong || wq.updated_at);
+  var t = wq && wq.last_wrong;
   if (!t) return 0;
   var v = Date.parse(t);
   return isNaN(v) ? 0 : v;
