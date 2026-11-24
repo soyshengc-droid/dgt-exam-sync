@@ -531,6 +531,34 @@ function getWrongCollection() {
 }
 function saveWrongCollection(w) { localStorage.setItem('dgt_wrong_collection', JSON.stringify(w)); markDirty(); }
 
+// 每道题最后一次作答的日期（YYYY-MM-DD，按天记录就够用了）。
+// 随机练习/随机考试用它来优先推"最近没做过"的题；随云端同步（取较新的日期）。
+function getQuestionSeen() {
+  try { return JSON.parse(localStorage.getItem('dgt_q_seen') || '{}') || {}; } catch (e) { return {}; }
+}
+function markQuestionSeen(q) {
+  if (!q || q.pregunta_id === undefined || q.pregunta_id === null) return;
+  const d = getQuestionSeen();
+  d[String(q.pregunta_id)] = new Date().toISOString().slice(0, 10);
+  try { localStorage.setItem('dgt_q_seen', JSON.stringify(d)); } catch (e) {}
+  markDirty();
+}
+// 用错题本里已有的"最后做错时间"回填做题日期，老数据也能参与优先级判断
+function backfillQuestionSeen() {
+  const seen = getQuestionSeen();
+  const coll = getWrongCollection();
+  let changed = false;
+  Object.keys(coll).forEach(function (id) {
+    const e = coll[id] || {};
+    const t = e.last_wrong || e.updated_at;
+    if (!t) return;
+    const day = String(t).slice(0, 10);
+    if (!seen[id] || day > seen[id]) { seen[id] = day; changed = true; }
+  });
+  if (changed) { try { localStorage.setItem('dgt_q_seen', JSON.stringify(seen)); } catch (e) {} }
+  return seen;
+}
+
 // 删除标记（tombstone）：只删本地的话，下次同步会被云端"复活"。
 // 记录被移出错题本的题号，随 sync.json 一起上传；之后如果又答过这道题，会重新加回。
 function getWrongDeleted() {
@@ -861,17 +889,74 @@ function pickWrongPriority(entries, limit) {
   return { selected: ordered.slice(0, limit), neverCorrectCount: neverCorrect.length };
 }
 
+// 随机练习 / 随机考试的抽题优先级（加权随机，保留随机感）：
+//   ① 最近没做过的题优先（今天刚做过的最低）
+//   ② 尤其是最近没碰过的题组（test_num）里的题
+//   ③ 错题集里的题额外加权（错得越多越优先）
+function pickPrioritizedRandom(all, n) {
+  const seen = backfillQuestionSeen();
+  const wrong = getWrongCollection();
+  const hist = getHistory();
+  const now = Date.now();
+  const DAY = 86400000;
+  function daysSince(day) {
+    if (!day) return Infinity;
+    const t = Date.parse(String(day).slice(0, 10) + 'T00:00:00Z');
+    if (isNaN(t)) return Infinity;
+    const d = (now - t) / DAY;
+    return d < 0 ? 0 : d;
+  }
+  // 题组最后一次被做的时间：每道题的记录 + 官方测试历史
+  const groupLast = {};
+  Object.keys(hist).forEach(function (k) {
+    if (!/^\d+$/.test(k)) return;
+    const d = hist[k] && hist[k].date;
+    if (!d) return;
+    const day = String(d).slice(0, 10);
+    if (!groupLast[k] || day > groupLast[k]) groupLast[k] = day;
+  });
+  all.forEach(function (q) {
+    const day = seen[String(q.pregunta_id)];
+    if (!day) return;
+    const g = String(q.test_num);
+    if (!groupLast[g] || day > groupLast[g]) groupLast[g] = day;
+  });
+
+  const weights = all.map(function (q) {
+    const id = String(q.pregunta_id);
+    let w = 1;
+    const a = daysSince(seen[id]);
+    if (a === Infinity) w *= 20;              // 从没做过
+    else if (a < 1) w *= 0.15;                // 今天刚做过
+    else w *= 1 + Math.min(a, 60) / 6;        // 越久没做权重越高
+    const ga = daysSince(groupLast[String(q.test_num)]);
+    if (ga === Infinity) w *= 5;              // 整个题组没做过
+    else if (ga < 1) w *= 0.25;               // 这个题组今天做过
+    else w *= 1 + Math.min(ga, 60) / 10;      // 题组越久没碰权重越高
+    const we = wrong[id];
+    if (we) w *= 6 + Math.min(we.times_wrong || 0, 5); // 错题集里的题
+    return w;
+  });
+
+  // 加权随机抽样（不放回）：key = random^(1/w)，取 key 最大的 n 个
+  return all.map(function (q, i) {
+    return { q: q, k: Math.pow(Math.random(), 1 / weights[i]) };
+  }).sort(function (a, b) { return b.k - a.k; })
+    .slice(0, Math.min(n, all.length))
+    .map(function (x) { return x.q; });
+}
+
 function startRandomTimed() {
   loadAllQuestions(arr => {
     if (!arr || !arr.length) return;
-    beginPracticeSession(pickRandom(arr, QUESTIONS_PER_TEST), 'random_timed', 'Aleatorio', '🎲 Test Aleatorio Cronometrado');
+    beginPracticeSession(pickPrioritizedRandom(arr, QUESTIONS_PER_TEST), 'random_timed', 'Aleatorio', '🎲 Test Aleatorio Cronometrado · prioriza poco vistas');
   });
 }
 
 function startRandomPractice() {
   loadAllQuestions(arr => {
     if (!arr || !arr.length) return;
-    beginPracticeSession(pickRandom(arr, QUESTIONS_PER_TEST), 'random_practice', 'Aleatorio', '🧠 Práctica Aleatoria');
+    beginPracticeSession(pickPrioritizedRandom(arr, QUESTIONS_PER_TEST), 'random_practice', 'Aleatorio', '🧠 Práctica Aleatoria · prioriza poco vistas');
   });
 }
 
@@ -1220,6 +1305,7 @@ function selectAnswer(letter) {
   if (isPractice() && userAnswers[currentQIndex] !== undefined) return;
   userAnswers[currentQIndex] = letter;
   answerTimes[currentQIndex] = new Date().toISOString();
+  markQuestionSeen(currentQuestions[currentQIndex]); // 记录"这道题今天做过"，供随机模式排优先级
   commitWrongCollection();        // 立即记入错题本（幂等，重答不重复计数）
   debouncedSyncWrong();           // 有 token 时防抖同步云端
   renderQuestion();
@@ -1962,16 +2048,25 @@ window.exportPDF=function(){
       });
   }
   function readLocal() {
-    var h = {}, w = {}, d = {};
+    var h = {}, w = {}, d = {}, s = {};
     try { h = JSON.parse(localStorage.getItem('dgt_test_history') || '{}'); } catch (e) {}
     try { w = JSON.parse(localStorage.getItem('dgt_wrong_collection') || '{}'); } catch (e) {}
     try { d = JSON.parse(localStorage.getItem('dgt_wrong_deleted') || '{}') || {}; } catch (e) {}
-    return { h: h, w: w, d: d };
+    try { s = JSON.parse(localStorage.getItem('dgt_q_seen') || '{}') || {}; } catch (e) {}
+    return { h: h, w: w, d: d, s: s };
   }
   function writeLocal(d) {
     if (d.h) localStorage.setItem('dgt_test_history', JSON.stringify(d.h));
     if (d.w) localStorage.setItem('dgt_wrong_collection', JSON.stringify(d.w));
     if (d.d) localStorage.setItem('dgt_wrong_deleted', JSON.stringify(d.d));
+    if (d.s) localStorage.setItem('dgt_q_seen', JSON.stringify(d.s));
+  }
+  // 做题日期合并：每题取较新的日期（幂等，重复同步不会出错）
+  function mergeSeen(cs, ls) {
+    var out = {}, k;
+    for (k in (cs || {})) out[k] = cs[k];
+    for (k in (ls || {})) if (!out[k] || (ls[k] || '') > out[k]) out[k] = ls[k];
+    return out;
   }
   // 删除标记合并：两边取并集
   function mergeDeleted(cd, ld) {
@@ -2083,7 +2178,7 @@ window.exportPDF=function(){
         .then(function (remote) { return readCloud(remote, H); })
         .then(function (cloud) {
           var local = readLocal();
-          writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(null, cloud.w || {}, local.w) });
+          writeLocal({ h: mergeHist(local.h, cloud.h || {}), w: mergeWrong(null, cloud.w || {}, local.w), s: mergeSeen(cloud.s || {}, local.s) });
           refreshUI();
           console.log('☁️ 已从云端拉取');
           if (done) done(null);
@@ -2108,23 +2203,25 @@ window.exportPDF=function(){
         .then(function (res) {
           var remote = res.remote;
           var cloud = res.cloud;
-          var cloudNorm = { h: cloud.h || {}, w: cloud.w || {}, d: cloud.d || {} };
+          var cloudNorm = { h: cloud.h || {}, w: cloud.w || {}, d: cloud.d || {}, s: cloud.s || {} };
           var seq0 = window.__localWriteSeq || 0;
           var base = readBase();
           var local = readLocal();
           // 云端 + 本机自上次同步以来的增量 = 两边作答次数相加
-          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(base, cloudNorm.w, local.w), d: mergeDeleted(cloudNorm.d, local.d) };
+          var merged = { h: mergeHist(cloudNorm.h, local.h), w: mergeWrong(base, cloudNorm.w, local.w), d: mergeDeleted(cloudNorm.d, local.d), s: mergeSeen(cloudNorm.s, local.s) };
           // 删除标记：同步后"移出错题本/清空"依然生效（同步期间又答过的会复活）
           applyDeletions(merged.d, base, local.w, merged.w);
 
           function finishSync() {
             var finalW = merged.w;
             var finalH = merged.h;
+            var finalS = merged.s;
             var seqNow = window.__localWriteSeq || 0;
             if (seqNow !== seq0) {
               // 同步期间用户又答了题：把这段新增量补到本地，下一次同步再上传
               var local2 = readLocal();
               finalH = mergeHist(merged.h, local2.h || {});
+              finalS = mergeSeen(merged.s, local2.s || {});
               finalW = JSON.parse(JSON.stringify(merged.w));
               Object.keys(local2.w || {}).forEach(function (id) {
                 var b = local2.w[id];
@@ -2141,7 +2238,7 @@ window.exportPDF=function(){
               // 同步期间若又答了被删掉的题，这里同样让它复活
               applyDeletions(merged.d, base, local2.w || {}, finalW);
             }
-            writeLocal({ h: finalH, w: finalW, d: merged.d });
+            writeLocal({ h: finalH, w: finalW, d: merged.d, s: finalS });
             if (typeof rebaseSessionBaseline === 'function') rebaseSessionBaseline(finalW);
             refreshUI();
             // 基线记录"云端已收到的版本"；本地可能领先它，下次同步补传
