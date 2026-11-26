@@ -45,7 +45,7 @@ if (!/^[a-z0-9]{4,32}$/.test(code)) throw new Error('code 只能是小写字母�
 const repo = 'dgt-data-' + code;
 const expires = monthsLater(MONTHS);
 const dry = !!args['dry-run'];
-const link = PAGE + '?p=' + code + '&e=' + expires;
+const link = PAGE;
 
 function gh(...argv) {
   return execFileSync('gh', argv, { encoding: 'utf8' }).trim();
@@ -72,11 +72,11 @@ if (!dry) {
 }
 
 console.log('\n================ 发给朋友 ================');
-console.log('题库链接：');
+console.log('公共链接（谁都能打开，但没有 token 进不去）：');
 console.log('  ' + link);
 console.log('');
-console.log('有效期：' + expires + '（' + MONTHS + ' 个月）');
-console.log('专属数据仓库：' + OWNER + '/' + repo + '（私有，只有这个 token 能读写）');
+console.log('有效期：' + expires + '（' + MONTHS + ' 个月，由 token 的到期日控制）');
+console.log('朋友专属数据仓库：' + OWNER + '/' + repo + '（私有，只有这个 token 能读写）');
 console.log('');
 console.log('请你在 GitHub 上给他生成一个 Fine-grained token：');
 console.log('  GitHub → Settings → Developer settings → Personal access tokens');
@@ -89,15 +89,15 @@ console.log('  生成后把 token（github_pat_ 开头）发给朋友。');
 console.log('');
 console.log('================ 发给朋友的话术 ================');
 console.log('题库链接：' + link);
-console.log('你的同步 token：<把刚生成的 github_pat_... 粘在这里>');
-console.log('有效期到 ' + expires + '。打开链接后，点右上角 ☁️ Sync，把 token 粘贴进去即可。');
+console.log('你的访问 token：<把刚生成的 github_pat_... 粘在这里>');
+console.log('有效期到 ' + expires + '。打开链接后在首页粘贴 token 才能进入；进入后点 ☁️ Sync 即可同步。');
 console.log('到期后找我续期，做题记录不会丢。');
 console.log('================================================');
 console.log('');
 console.log('续期方法（记录不丢）：');
 console.log('  1. 给同一个仓库 ' + OWNER + '/' + repo + ' 重新生成一个 Fine-grained token（新到期日）；');
-console.log('  2. 把新 token 发给朋友，他在 App 里点 ☁️ 重新粘贴；');
+console.log('  2. 把新 token 发给朋友（链接不变），他在进入页粘贴新 token；');
 console.log('  3. 数据一直在仓库里，换 token 不影响。');
-console.log('如果要彻底停用：不续期即可（token 到期后无法同步）；也可以删除该仓库。');
+console.log('如果要彻底停用：不续期即可（token 到期后 GitHub 直接拒绝，进不去也同步不了）；也可以删除该仓库。');
 console.log('');
-console.log('注意：链接里的 e 是客户端软提醒；真正强制停用靠 token 到期（GitHub 服务端校验）。');
+console.log('注意：访问控制靠 token 到期（GitHub 服务端校验）；题库文件本身在公开的 GitHub Pages 上，懂技术的人仍可直接下载文件，无法 100% 阻止。');

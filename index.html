@@ -245,6 +245,7 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
   <input id="app-pass-input" type="password" autocomplete="off" placeholder="密码" style="width:min(320px,82vw);padding:12px 16px;font-size:16px;border-radius:10px;border:1px solid #334155;background:#1e293b;color:#fff;text-align:center;outline:none">
   <button id="app-pass-btn" onclick="window.__tryUnlock()" style="width:min(320px,82vw);padding:12px 16px;font-size:16px;font-weight:600;border-radius:10px;border:none;background:#2563eb;color:#fff;cursor:pointer">进入</button>
   <p id="app-pass-err" style="margin:0;color:#f87171;font-size:14px;min-height:18px"></p>
+  <p id="app-pass-alt" onclick="window.__ownerLogin&&window.__ownerLogin()" style="margin:0;color:#64748b;font-size:13px;cursor:pointer;display:none">我是主人，用密码登录</p>
 </div>
 
 <script>
@@ -275,8 +276,14 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 <script>
 (function () {
   var HASH = '0d68eb17363a3a3ec8915c062c2150a3296151fec3ac6e96ac798ca8e3663605';
+  var OWNER_LOGIN = 'soyshengc-droid';
+  var MODE = 'token'; // 公开链接默认：token 进入
+
   function unlocked() { try { return localStorage.getItem('dgt_app_unlocked') === '1'; } catch (e) { return false; } }
   function profileMode() { try { return !!localStorage.getItem('dgt_data_repo'); } catch (e) { return false; } }
+  function profileRepo() { try { return localStorage.getItem('dgt_data_repo') || ''; } catch (e) { return ''; } }
+  function profileToken() { try { return localStorage.getItem('dgt_token__' + profileRepo()) || ''; } catch (e) { return ''; } }
+  function storeProfileToken(t) { try { localStorage.setItem('dgt_token__' + profileRepo(), t); } catch (e) {} }
   function licExp() { try { return localStorage.getItem('dgt_lic_exp'); } catch (e) { return null; } }
   function expiryText() {
     var e = licExp(); if (!e) return '';
@@ -291,6 +298,14 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     return !isNaN(t) && Date.now() > t;
   }
   function hideLock() { var lock = document.getElementById('app-lock'); if (lock) lock.style.display = 'none'; }
+  function tokenLock(msg) {
+    var lock = document.getElementById('app-lock');
+    if (lock) lock.style.display = 'flex';
+    var err = document.getElementById('app-pass-err');
+    if (err) err.textContent = msg || '';
+    var input = document.getElementById('app-pass-input');
+    if (input) { input.value = ''; try { input.focus(); } catch (e) {} }
+  }
   function lockExpired() {
     var lock = document.getElementById('app-lock');
     if (!lock) return;
@@ -302,44 +317,174 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
     if (p) p.textContent = '此版本有效期至 ' + expiryText() + '，如需继续使用请联系分享者续期。';
     var input = document.getElementById('app-pass-input');
     var btn = document.getElementById('app-pass-btn');
+    var alt = document.getElementById('app-pass-alt');
     var err = document.getElementById('app-pass-err');
     if (input) input.style.display = 'none';
     if (btn) btn.style.display = 'none';
+    if (alt) alt.style.display = 'none';
     if (err) err.textContent = '';
+  }
+  function setLockText(title, desc, placeholder, btnLabel) {
+    var lock = document.getElementById('app-lock');
+    var h1 = lock && lock.querySelector('h1'); if (h1) h1.textContent = title;
+    var p = lock && lock.querySelector('p'); if (p) p.textContent = desc;
+    var input = document.getElementById('app-pass-input');
+    if (input) { input.placeholder = placeholder; input.value = ''; input.style.display = ''; }
+    var btn = document.getElementById('app-pass-btn');
+    if (btn) { btn.textContent = btnLabel || '进入'; btn.style.display = ''; btn.disabled = false; }
+    var err = document.getElementById('app-pass-err'); if (err) err.textContent = '';
+  }
+  function showAlt(show) {
+    var a = document.getElementById('app-pass-alt');
+    if (a) a.style.display = show ? 'block' : 'none';
   }
   async function sha256Hex(s) {
     var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
     return Array.prototype.map.call(new Uint8Array(buf), function (b) { return b.toString(16).padStart(2, '0'); }).join('');
   }
+  function ghGet(url, token) {
+    return fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' },
+      cache: 'no-store'
+    });
+  }
+  function checkProfileToken(t) {
+    return ghGet('https://api.github.com/repos/' + profileRepo(), t);
+  }
+  // 公开链接：只凭 token 识别他属于哪个题库（dgt-data-*）；主人的 token 识别为默认仓库
+  async function discoverRepo(token) {
+    try {
+      var r = await ghGet('https://api.github.com/user/repos?per_page=100&sort=full_name', token);
+      if (r.ok) {
+        var list = await r.json();
+        var cands = (Array.isArray(list) ? list : []).filter(function (x) {
+          return x && typeof x.full_name === 'string' &&
+            x.full_name.indexOf(OWNER_LOGIN + '/dgt-data-') === 0;
+        });
+        if (cands.length === 1) return cands[0].full_name;
+        if (cands.length > 1) return { error: '这个 token 绑定了多个题库，请联系分享者' };
+      }
+    } catch (e) { throw e; }
+    try {
+      var r2 = await ghGet('https://api.github.com/repos/' + OWNER_LOGIN + '/dgt-sync-data', token);
+      if (r2.ok) return OWNER_LOGIN + '/dgt-sync-data';
+    } catch (e) { throw e; }
+    return null;
+  }
+  function enter() {
+    hideLock();
+    if (typeof window.__onUnlock === 'function') { try { window.__onUnlock(); } catch (e) {} }
+  }
+  function wireEnter() {
+    var input = document.getElementById('app-pass-input');
+    if (input) {
+      input.onkeydown = function (e) { if (e.key === 'Enter') window.__tryUnlock(); };
+      try { input.focus(); } catch (e) {}
+    }
+  }
+  window.__ownerLogin = function () {
+    MODE = 'password';
+    setLockText('主人登录', '请输入主人密码', '密码', '进入');
+    showAlt(false);
+    wireEnter();
+  };
+  function initProfile() {
+    MODE = 'token';
+    var exp = expiryText();
+    setLockText('请输入访问 Token',
+      exp ? '这是专属题库（有效期至 ' + exp + '）。请输入分享者给你的 token 才能进入。'
+          : '这是你的专属题库。请输入分享者给你的 token 才能进入。',
+      'github_pat_...', '进入');
+    showAlt(false);
+    var saved = profileToken();
+    if (saved) {
+      enter();
+      checkProfileToken(saved).then(function (r) {
+        if (r.status === 401 || r.status === 403 || r.status === 404) tokenLock('token 已失效或没有该题库的权限，请重新输入');
+      }).catch(function () { /* 离线时保持已进入状态 */ });
+      return;
+    }
+    wireEnter();
+  }
+  function initPublicToken() {
+    MODE = 'token';
+    setLockText('请输入访问 Token', '这是公开题库链接。只有拿到分享者 token 的人才能进入。', 'github_pat_...', '进入');
+    showAlt(true);
+    wireEnter();
+  }
   window.__tryUnlock = async function () {
     var input = document.getElementById('app-pass-input');
     var err = document.getElementById('app-pass-err');
     if (isExpired()) { lockExpired(); return; }
-    var v = input ? input.value : '';
+    var btn = document.getElementById('app-pass-btn');
+
+    // 1) ?p= 专属链接：token 必须能访问指定仓库
+    if (profileMode()) {
+      var v1 = input ? String(input.value || '').trim() : '';
+      if (!v1) return;
+      if (btn) { btn.disabled = true; btn.textContent = '验证中…'; }
+      try {
+        var res = await checkProfileToken(v1);
+        if (res.ok) { storeProfileToken(v1); enter(); }
+        else {
+          if (err) err.textContent = 'Token 无效或没有该题库的权限（HTTP ' + res.status + '）';
+          if (input) { input.value = ''; input.focus(); }
+        }
+      } catch (e) {
+        if (err) err.textContent = '网络不可用，请连网后再试';
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '进入'; }
+      }
+      return;
+    }
+
+    // 2) 主人密码
+    if (MODE === 'password') {
+      var v2 = input ? input.value : '';
+      try {
+        if ((await sha256Hex(v2)) === HASH) {
+          try { localStorage.setItem('dgt_app_unlocked', '1'); } catch (e) {}
+          enter();
+        } else {
+          if (err) err.textContent = '密码错误，请重试';
+          if (input) { input.value = ''; input.focus(); }
+        }
+      } catch (e) {
+        if (err) err.textContent = '此设备不支持安全加密，请换用最新版浏览器';
+      }
+      return;
+    }
+
+    // 3) 公开链接 + token：自动识别 token 属于哪个题库
+    var v3 = input ? String(input.value || '').trim() : '';
+    if (!v3) return;
+    if (btn) { btn.disabled = true; btn.textContent = '验证中…'; }
     try {
-      if ((await sha256Hex(v)) === HASH) {
-        try { localStorage.setItem('dgt_app_unlocked', '1'); } catch (e) {}
-        hideLock();
-        if (typeof window.__onUnlock === 'function') { try { window.__onUnlock(); } catch (e) {} }
-      } else {
-        if (err) err.textContent = '密码错误，请重试';
+      var repo = await discoverRepo(v3);
+      if (!repo) {
+        if (err) err.textContent = 'Token 无效，或还没有绑定题库（请确认 token 有 Contents 权限）';
         if (input) { input.value = ''; input.focus(); }
+      } else if (repo.error) {
+        if (err) err.textContent = repo.error;
+      } else {
+        try {
+          localStorage.setItem('dgt_data_repo', repo);
+          localStorage.setItem('dgt_token__' + repo, v3);
+          if (repo === OWNER_LOGIN + '/dgt-sync-data') localStorage.setItem('dgt_app_unlocked', '1');
+        } catch (e) {}
+        enter();
       }
     } catch (e) {
-      if (err) err.textContent = '此设备不支持安全加密，请换用最新版浏览器';
+      if (err) err.textContent = '网络不可用，请连网后再试';
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '进入'; }
     }
   };
   function init() {
     if (isExpired()) { lockExpired(); return; }
-    // 朋友分享链接直接进入，不需要主人的密码
-    if (profileMode()) {
-      hideLock();
-      if (typeof window.__onUnlock === 'function') { try { window.__onUnlock(); } catch (e) {} }
-      return;
-    }
+    if (profileMode()) { initProfile(); return; }
     if (unlocked()) { hideLock(); return; }
-    var input = document.getElementById('app-pass-input');
-    if (input) { input.addEventListener('keydown', function (e) { if (e.key === 'Enter') window.__tryUnlock(); }); input.focus(); }
+    initPublicToken();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
