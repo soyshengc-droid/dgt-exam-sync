@@ -353,6 +353,12 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
   }
   // 公开链接：只凭 token 识别他属于哪个题库（dgt-data-*）；主人的 token 识别为默认仓库
   async function discoverRepo(token) {
+    // 先看是不是主人的 token（能访问默认仓库）—— 放在前面，避免主人用经典 token 时
+    // 看到所有朋友的仓库而无法判断。
+    try {
+      var r0 = await ghGet('https://api.github.com/repos/' + OWNER_LOGIN + '/dgt-sync-data', token);
+      if (r0.ok) return OWNER_LOGIN + '/dgt-sync-data';
+    } catch (e) { throw e; }
     try {
       var r = await ghGet('https://api.github.com/user/repos?per_page=100&sort=full_name', token);
       if (r.ok) {
@@ -364,10 +370,6 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
         if (cands.length === 1) return cands[0].full_name;
         if (cands.length > 1) return { error: '这个 token 绑定了多个题库，请联系分享者' };
       }
-    } catch (e) { throw e; }
-    try {
-      var r2 = await ghGet('https://api.github.com/repos/' + OWNER_LOGIN + '/dgt-sync-data', token);
-      if (r2.ok) return OWNER_LOGIN + '/dgt-sync-data';
     } catch (e) { throw e; }
     return null;
   }
