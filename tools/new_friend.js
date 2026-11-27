@@ -41,14 +41,14 @@ function randomCode(n) {
 }
 
 const code = String(args.code || randomCode(8)).toLowerCase();
-if (!/^[a-z0-9]{4,32}$/.test(code)) throw new Error('code 只能是小写字母和数字，4-32 位');
+if (!/^[a-z0-9]{2,32}$/.test(code)) throw new Error('code 只能是小写字母和数字，2-32 位');
 const repo = 'dgt-data-' + code;
 const expires = monthsLater(MONTHS);
 const dry = !!args['dry-run'];
 const link = PAGE;
 
 function gh(...argv) {
-  return execFileSync('gh', argv, { encoding: 'utf8' }).trim();
+  return execFileSync('gh', argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 if (!dry) {
